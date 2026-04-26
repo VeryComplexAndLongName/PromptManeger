@@ -2,6 +2,11 @@
 
 Local FastAPI + Vue app for storing, versioning, tagging, and optimizing prompt templates.
 
+![Screenshot 1](1.png)
+![Screenshot 2](2.png)
+
+
+
 ## Key Features
 
 - Prompt storage by `project` + `name`
