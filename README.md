@@ -2,6 +2,10 @@
 
 Local FastAPI + Vue app for storing, versioning, tagging, and optimizing prompt templates.
 
+## Main Purpose Snapshot
+
+![Main Program Purpose](screen2.png)
+
 ![Screenshot 1](1.png)
 ![Screenshot 2](2.png)
 
