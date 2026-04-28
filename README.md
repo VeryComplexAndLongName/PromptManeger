@@ -272,6 +272,62 @@ ruff format .
 mypy .
 ```
 
+## Load Testing
+
+This project includes repeatable load testing based on Locust and CSV-based chart generation.
+
+### Run benchmark
+
+```powershell
+python loadtests/benchmark_rps.py --host http://127.0.0.1:8000 --duration 30s --users 10 20 40 --spawn-rate 10
+```
+
+### Build charts
+
+```powershell
+python loadtests/generate_charts.py
+```
+
+Charts are built from aggregated rows in `loadtests/results/**/u*_stats.csv` and written to `loadtests/`.
+
+### Chart: Dashboard
+
+![Load Testing Dashboard](loadtests/chart_dashboard.png)
+
+Combined view for quick comparison across scenarios and user levels:
+- Throughput (`RPS`)
+- P95 latency
+- Average latency
+- Failure rate
+
+### Chart: Throughput (RPS)
+
+![Load Test Throughput](loadtests/chart_rps.png)
+
+Shows how total request throughput changes as concurrent user count increases.
+Use this graph to estimate sustainable request rate before latency degradation.
+
+### Chart: P95 Latency
+
+![Load Test P95 Latency](loadtests/chart_p95_latency.png)
+
+Shows tail latency behavior.
+If this curve grows sharply, the service is near a bottleneck and user-facing response time becomes unstable.
+
+### Chart: Average Latency
+
+![Load Test Average Latency](loadtests/chart_avg_latency.png)
+
+Shows general response-time trend under load.
+Useful with P95 to distinguish overall slowdown from tail-only spikes.
+
+### Chart: Failure Rate
+
+![Load Test Failure Rate](loadtests/chart_failure_rate.png)
+
+Shows percentage of failed requests per run.
+Combine this with latency and RPS to define production-ready capacity thresholds.
+
 ## Snippets
 
 - Diagnostic one-off scripts are stored in `snippets/`.
