@@ -357,3 +357,7 @@ Combine this with latency and RPS to define production-ready capacity thresholds
 ├── alembic/
 └── ui/
 ```
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
