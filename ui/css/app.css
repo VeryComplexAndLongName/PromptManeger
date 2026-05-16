@@ -290,6 +290,31 @@ button:hover { transform: translateY(-1px); filter: saturate(1.15); }
   letter-spacing: 0.06em; color: var(--muted);
 }
 
+.new-version-editor {
+  border: 1px solid rgba(38,102,127,0.2);
+  border-radius: 12px;
+  padding: 12px;
+  background: rgba(38,102,127,0.04);
+  display: grid;
+  gap: 12px;
+}
+
+.new-version-group {
+  border: 1px solid rgba(23,32,38,0.12);
+  border-radius: 10px;
+  padding: 10px;
+  background: rgba(255,255,255,0.8);
+}
+
+.new-version-group-title {
+  margin: 0 0 10px;
+  color: #1f5165;
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+
 /* ── Markdown output ── */
 .md-content {
   background: #f8f6f0; border-radius: 10px; padding: 14px 16px;
@@ -340,7 +365,7 @@ button:hover { transform: translateY(-1px); filter: saturate(1.15); }
 .create-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 
 /* ── Markdown split editor ── */
-.md-editor { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.md-editor { display: grid; grid-template-columns: 1fr; gap: 10px; }
 .md-editor textarea { resize: vertical; }
 .md-editor-preview-label {
   font-size: 0.78rem; color: var(--muted); text-transform: uppercase;

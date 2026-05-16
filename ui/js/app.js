@@ -683,35 +683,37 @@ createApp({
             <!-- New version editor -->
             <div class="detail-section">
               <h4>Create new version</h4>
-              <div class="create-grid">
-                <div class="field">
-                  <label>Role (optional)</label>
-                  <input v-model="newVersionRole" placeholder="You are a helpful assistant..." />
+              <div class="new-version-editor">
+                <div class="new-version-group">
+                  <p class="new-version-group-title">Prompt components</p>
+                  <div class="field">
+                    <label>Role (optional)</label>
+                    <input v-model="newVersionRole" placeholder="You are a helpful assistant..." />
+                  </div>
+                  <div class="field">
+                    <label>Task (required)</label>
+                    <textarea v-model="newVersionTask" style="min-height:160px" placeholder="Generate a summary of..."></textarea>
+                  </div>
+                  <div class="field">
+                    <label>Context (optional)</label>
+                    <textarea v-model="newVersionContext" style="min-height:160px" placeholder="Background information, data format, target audience..."></textarea>
+                  </div>
+                  <div class="field">
+                    <label>Constraints (optional)</label>
+                    <textarea v-model="newVersionConstraints" style="min-height:80px" placeholder="Limitations, rules, format restrictions..."></textarea>
+                  </div>
+                  <div class="field">
+                    <label>Output Format (optional)</label>
+                    <textarea v-model="newVersionOutputFormat" style="min-height:80px" placeholder="JSON, CSV, markdown, bullet points..."></textarea>
+                  </div>
+                  <div class="field">
+                    <label>Examples (optional)</label>
+                    <textarea v-model="newVersionExamples" style="min-height:80px" placeholder="Input/output examples..."></textarea>
+                  </div>
                 </div>
-                <div class="field">
-                  <label>Task (required)</label>
-                  <textarea v-model="newVersionTask" style="min-height:80px" placeholder="Generate a summary of..."></textarea>
-                </div>
-              </div>
-              <div class="field">
-                <label>Context (optional)</label>
-                <textarea v-model="newVersionContext" style="min-height:80px" placeholder="Background information, data format, target audience..."></textarea>
-              </div>
-              <div class="field">
-                <label>Constraints (optional)</label>
-                <textarea v-model="newVersionConstraints" style="min-height:80px" placeholder="Limitations, rules, format restrictions..."></textarea>
-              </div>
-              <div class="field">
-                <label>Output Format (optional)</label>
-                <textarea v-model="newVersionOutputFormat" style="min-height:80px" placeholder="JSON, CSV, markdown, bullet points..."></textarea>
-              </div>
-              <div class="field">
-                <label>Examples (optional)</label>
-                <textarea v-model="newVersionExamples" style="min-height:80px" placeholder="Input/output examples..."></textarea>
-              </div>
-              <div class="field">
-                <div class="md-editor">
-                  <div>
+                <div class="new-version-group">
+                  <p class="new-version-group-title">Composed preview</p>
+                  <div class="field">
                     <div class="md-editor-preview-label">Preview</div>
                     <div class="md-editor-preview" :class="{empty: !newVersionTask}" v-html="newVersionTask ? md(buildPromptMarkdown({role: newVersionRole, task: newVersionTask, context: newVersionContext, constraints: newVersionConstraints, output_format: newVersionOutputFormat, examples: newVersionExamples})) : 'Nothing to preview yet\u2026'"></div>
                   </div>
@@ -769,19 +771,17 @@ createApp({
       </div>
       <fieldset class="group-box">
         <legend>Prompt Data</legend>
-        <div class="create-grid">
-          <div class="field">
-            <label>Role (optional)</label>
-            <input v-model="form.role" placeholder="You are a helpful assistant..." />
-          </div>
-          <div class="field">
-            <label>Task (required)</label>
-            <textarea v-model="form.task" style="min-height:80px" placeholder="Generate a summary of..."></textarea>
-          </div>
+        <div class="field">
+          <label>Role (optional)</label>
+          <input v-model="form.role" placeholder="You are a helpful assistant..." />
+        </div>
+        <div class="field">
+          <label>Task (required)</label>
+          <textarea v-model="form.task" style="min-height:160px" placeholder="Generate a summary of..."></textarea>
         </div>
         <div class="field">
           <label>Context (optional)</label>
-          <textarea v-model="form.context" style="min-height:80px" placeholder="Background information, data format, target audience..."></textarea>
+          <textarea v-model="form.context" style="min-height:160px" placeholder="Background information, data format, target audience..."></textarea>
         </div>
         <div class="field">
           <label>Constraints (optional)</label>
@@ -797,12 +797,8 @@ createApp({
         </div>
       </fieldset>
       <div class="field">
-        <div class="md-editor">
-          <div>
-            <div class="md-editor-preview-label">Preview</div>
-            <div class="md-editor-preview" :class="{empty: !form.task}" v-html="form.task ? md(buildPromptMarkdown(form)) : 'Nothing to preview yet\u2026'"></div>
-          </div>
-        </div>
+        <div class="md-editor-preview-label">Preview</div>
+        <div class="md-editor-preview" :class="{empty: !form.task}" v-html="form.task ? md(buildPromptMarkdown(form)) : 'Nothing to preview yet\u2026'"></div>
       </div>
       <div class="btn-row">
         <div class="split-wrap">
