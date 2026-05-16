@@ -33,7 +33,7 @@ from schemas import (
     PromptVersionOut,
 )
 
-app = FastAPI(title="Local Prompt Manager")
+app = FastAPI(title="Local Prompt Man")
 app.mount("/ui", StaticFiles(directory="ui"), name="ui")
 
 
