@@ -580,7 +580,7 @@ createApp({
 
   template: `
     <header style="margin-bottom:4px">
-      <h1>Prompt Manager</h1>
+      <h1>Prompt Man</h1>
       <p class="subtitle">Versioned prompts with tags &amp; markdown.</p>
     </header>
 

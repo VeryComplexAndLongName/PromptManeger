@@ -1,4 +1,4 @@
-# Prompt Manager
+# Prompt Man
 
 Local FastAPI + Vue app for storing, versioning, tagging, and optimizing prompt templates.
 
