@@ -68,6 +68,7 @@ class OptimizeConfigUpdate(BaseModel):
     llm_model: str | None = None
     llm_base_url: str | None = None
     llm_timeout_seconds: int | None = None
+    llm_api_token: str | None = None
     clear_model_id: bool = False
 
 
@@ -79,6 +80,7 @@ class OptimizeConfigOut(BaseModel):
     runtime_llm_model: str | None = None
     runtime_llm_base_url: str | None = None
     runtime_llm_timeout_seconds: int | None = None
+    runtime_has_llm_api_token: bool = False
     env_model_id: str | None = None
     env_rounds: int | None = None
     env_gp_profile: str | None = None
@@ -86,6 +88,7 @@ class OptimizeConfigOut(BaseModel):
     env_llm_model: str | None = None
     env_llm_base_url: str | None = None
     env_llm_timeout_seconds: int | None = None
+    env_has_llm_api_token: bool = False
     effective_model_id: str | None = None
     effective_rounds: int
     effective_gp_profile: str
@@ -94,6 +97,7 @@ class OptimizeConfigOut(BaseModel):
     effective_llm_model: str
     effective_llm_base_url: str
     effective_llm_timeout_seconds: int
+    effective_has_llm_api_token: bool = False
     gradient_enabled: bool
 
 

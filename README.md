@@ -16,6 +16,7 @@ Local FastAPI + Vue app for storing, versioning, tagging, and optimizing prompt 
 - Prompt storage by `project` + `name`
 - Immutable prompt version history
 - Tagging with AND/OR search
+- Prompt deletion with cascading cleanup
 - Structured prompt fields:
   - `role` (optional)
   - `task` (required)
@@ -25,10 +26,13 @@ Local FastAPI + Vue app for storing, versioning, tagging, and optimizing prompt 
   - `examples` (optional)
 - Split optimization actions in UI:
   - default click: `Optimize Prompt` -> GreaterPrompt flow
-  - dropdown item: `Optimize Prompt with LLM` -> LLM flow (Ollama by default)
+  - dropdown item: `Optimize Prompt with LLM` -> LLM flow
+- Multi-provider LLM support (Ollama, OpenAI, Anthropic)
+- Dynamic LLM model discovery from provider
 - Runtime optimization tuning without restart via `GET/PUT /optimize/config`:
   - GreaterPrompt: `model_id`, `rounds`, `gp_profile`
-  - LLM: `llm_provider`, `llm_model`, `llm_base_url`, `llm_timeout_seconds`
+  - LLM: `llm_provider`, `llm_model`, `base_url`, `llm_api_token` (encrypted), `llm_timeout_seconds`
+- Reoptimize button for in-place optimization modal refinement
 
 ## Requirements
 
@@ -74,6 +78,7 @@ uvicorn main:app --reload
 - `Optimize Prompt with LLM` (dropdown item) runs LLM optimization.
 - Optimization result opens in modal.
 - `Update Prompt` in modal saves optimized data as a new version.
+- `Delete Prompt` removes the prompt and all its versions (with confirmation).
 
 ### Create tab
 
@@ -81,6 +86,29 @@ uvicorn main:app --reload
 - `Optimize Prompt` main click uses GreaterPrompt.
 - Dropdown includes `Optimize Prompt with LLM`.
 - `Update Prompt` in modal applies optimized values back to Create form.
+
+### Optimization Modal
+
+When optimization completes, a modal shows the result with two sections:
+
+**LLM Settings** (when using LLM optimization):
+- **LLM Provider:** Dropdown to switch between Ollama, OpenAI, Anthropic Claude
+- **LLM Model:** Dynamically populated based on provider; fetched from provider's model list
+- **Base URL:** Auto-updates when provider changes; editable for custom endpoints
+- **API Token:** Appears only for OpenAI and Anthropic; masked input for security
+  - Shows "✓ Token is configured" if one is already saved
+  - Token is encrypted on server, never exposed in API responses
+- **LLM Timeout (seconds):** Timeout for LLM API calls
+
+**GreaterPrompt Settings** (always available):
+- **GreaterPrompt Profile:** `fast` or `quality` preset
+- **GreaterPrompt Model ID (optional):** For gradient-mode optimization
+- **Gradient Rounds:** Number of rounds for GreaterPrompt optimization
+
+**Action Buttons:**
+- **Save Config:** Persists all settings (including encrypted token) for next session
+- **Reoptimize:** Re-runs optimization with current settings without closing modal
+- **Update Prompt:** Accepts the result and updates the prompt version
 
 ## Optimization Endpoints
 
@@ -112,7 +140,7 @@ PUT /optimize/config
 - Change optimization configuration in runtime, without restarting server.
 - Supports both GreaterPrompt and LLM configuration.
 
-Example update:
+Example update (GreaterPrompt + Ollama):
 
 ```json
 {
@@ -122,9 +150,29 @@ Example update:
   "llm_provider": "ollama",
   "llm_model": "qwen2.5:0.5b",
   "llm_base_url": "http://127.0.0.1:11434",
+  "llm_timeout_seconds": 300,
+  "llm_api_token": null
+}
+```
+
+Example update (OpenAI with token):
+
+```json
+{
+  "llm_provider": "openai",
+  "llm_model": "gpt-4-turbo",
+  "llm_base_url": "https://api.openai.com/v1",
+  "llm_api_token": "sk-...",
   "llm_timeout_seconds": 300
 }
 ```
+
+**API Token Security:**
+- `llm_api_token` is optional and only required for providers that need authentication (OpenAI, Anthropic)
+- Token is encrypted on the server using Fernet encryption with a machine-specific key
+- API responses never return the token value, only a boolean flag indicating if one is configured (`effective_has_llm_api_token`)
+- Token is only decrypted internally when actually needed for API calls
+- Never expose plaintext tokens in logs or responses
 
 `gp_profile` options:
 
@@ -135,13 +183,57 @@ When gradient mode is enabled (`model_id` set), the active profile controls Grea
 
 ## Optimization Config Recommendations
 
+### Multi-Provider LLM Support
+
+The application supports three LLM providers out of the box:
+
+#### Ollama (Local)
+
+- **Default provider** for local inference
+- **Base URL:** `http://127.0.0.1:11434`
+- **Authentication:** Not required (no token)
+- **Available models:** Dynamically discovered from Ollama `/api/tags`
+- **Use case:** Local CPU/GPU inference, no API costs, full privacy
+
+Recommended models:
+- CPU-only: `qwen2.5:0.5b`, `llama3.2:1b`, `phi3:mini`
+- GPU: `llama3.1:8b`, `qwen2.5:7b`, `gemma2:9b`
+
+#### OpenAI
+
+- **Base URL:** `https://api.openai.com/v1` (or custom endpoint)
+- **Authentication:** Required — set `llm_api_token` to your API key
+- **Available models:** `gpt-4`, `gpt-4-turbo`, `gpt-3.5-turbo`
+- **Use case:** Cloud-based inference, latest models, higher quality
+
+Setup:
+1. Get API key from https://platform.openai.com/api-keys
+2. In UI: Select **OpenAI** from LLM Provider dropdown
+3. Enter API token in **API Token** field
+4. Select model
+5. Click **Save Config**
+
+#### Anthropic Claude
+
+- **Base URL:** `https://api.anthropic.com` (or custom endpoint)
+- **Authentication:** Required — set `llm_api_token` to your API key
+- **Available models:** `claude-3-opus`, `claude-3-sonnet`, `claude-3-haiku`
+- **Use case:** Alternative cloud provider, strong reasoning capabilities
+
+Setup:
+1. Get API key from https://console.anthropic.com/
+2. In UI: Select **Anthropic Claude** from LLM Provider dropdown
+3. Enter API token in **API Token** field
+4. Select model
+5. Click **Save Config**
+
 ### Default in this project
 
 Current runtime default is configured for local Ollama on CPU-friendly model:
 
 - `llm_provider`: `ollama`
 - `llm_model`: `qwen2.5:0.5b`
-- `llm_base_url`: `http://127.0.0.1:11434`
+- `base_url`: `http://127.0.0.1:11434`
 - `llm_timeout_seconds`: `300`
 - `gp_profile`: `fast`
 
@@ -222,6 +314,8 @@ These presets are applied when gradient optimization is enabled.
 - `OPTIMIZE_LLM_MODEL` (optional fallback, default `qwen2.5:0.5b`)
 - `OLLAMA_BASE_URL` (optional fallback, default `http://127.0.0.1:11434`)
 - `OPTIMIZE_LLM_TIMEOUT_SECONDS` (optional fallback, default `300`)
+- `OPTIMIZE_LLM_API_TOKEN` (optional encrypted API token for OpenAI/Anthropic)
+- `PROMPTMAN_KEY` (optional encryption key for token; if not set, uses machine hostname)
 
 Runtime config from `/optimize/config` has higher priority than env variables for the running process.
 
@@ -237,6 +331,10 @@ Runtime config from `/optimize/config` has higher priority than env variables fo
 - `POST /prompts`
 - `GET /prompts/{project}/{name}`
 - `PUT /prompts/{project}/{name}`
+- `DELETE /prompts/{project}/{name}`
+  - Deletes the prompt and all associated versions and tags
+  - Returns `204 No Content` on success
+  - Returns `404 Not Found` if prompt doesn't exist
 - `PUT /prompts/{project}/{name}/tags`
 - `GET /prompts/{project}/{name}/versions`
 - `GET /prompts/{project}/{name}/versions/{version}`

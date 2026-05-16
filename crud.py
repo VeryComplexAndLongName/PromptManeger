@@ -104,6 +104,11 @@ def get_prompt(db: Session, name: str, project: str) -> Prompt | None:
     return db.query(Prompt).filter_by(name=name, project=project).first()
 
 
+def delete_prompt(db: Session, prompt: Prompt) -> None:
+    db.delete(prompt)
+    db.commit()
+
+
 def _build_prompt_list_query(db: Session, project: str | None = None, tag: str | None = None):  # type: ignore[no-untyped-def]
     query = db.query(Prompt)
 
@@ -159,6 +164,21 @@ def add_version(
     output_format: str | None = None,
     examples: str | None = None,
 ) -> PromptVersion:
+    latest = get_latest_version(db, prompt_id)
+    if not latest:
+        raise ValueError(f"No latest version found for prompt {prompt_id}")
+
+    # Check if content is identical to latest version; if so, return latest without creating new version
+    if (
+        latest.role == role
+        and latest.task == task
+        and latest.context == context
+        and latest.constraints == constraints
+        and latest.output_format == output_format
+        and latest.examples == examples
+    ):
+        return latest
+
     if has_duplicate_prompt_version_content(
         db,
         role=role,
@@ -169,10 +189,6 @@ def add_version(
         examples=examples,
     ):
         raise ValueError("Duplicate prompt version content is not allowed")
-
-    latest = get_latest_version(db, prompt_id)
-    if not latest:
-        raise ValueError(f"No latest version found for prompt {prompt_id}")
     new_version = PromptVersion(
         prompt_id=prompt_id,
         version=latest.version + 1,

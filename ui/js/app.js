@@ -21,6 +21,7 @@ const defaultOptimizeConfig = () => ({
   llm_model: "qwen2.5:0.5b",
   llm_base_url: "http://127.0.0.1:11434",
   llm_timeout_seconds: 300,
+  llm_api_token: "",
   effective_model_id: "",
   effective_rounds: 2,
   effective_gp_profile: "fast",
@@ -28,15 +29,30 @@ const defaultOptimizeConfig = () => ({
   effective_llm_model: "qwen2.5:0.5b",
   effective_llm_base_url: "http://127.0.0.1:11434",
   effective_llm_timeout_seconds: 300,
+  effective_has_llm_api_token: false,
 });
+const llmProviderConfigs = {
+  ollama: {
+    label: "Ollama (Local)",
+    baseUrl: "http://127.0.0.1:11434",
+    models: ["qwen2.5:0.5b", "phi3:mini", "llama3.2:1b", "qwen2.5:1.5b", "gemma2:2b"],
+  },
+  openai: {
+    label: "OpenAI",
+    baseUrl: "https://api.openai.com/v1",
+    models: ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"],
+  },
+  anthropic: {
+    label: "Anthropic Claude",
+    baseUrl: "https://api.anthropic.com",
+    models: ["claude-3-opus", "claude-3-sonnet", "claude-3-haiku"],
+  },
+};
+const llmProviderOptions = Object.keys(llmProviderConfigs);
 const gpProfileOptions = ["fast", "quality"];
-const llmModelOptions = [
-  "qwen2.5:0.5b",
-  "phi3:mini",
-  "llama3.2:1b",
-  "qwen2.5:1.5b",
-  "gemma2:2b",
-];
+const defaultLlmModelsByProvider = Object.fromEntries(
+  Object.entries(llmProviderConfigs).map(([key, config]) => [key, config.models])
+);
 
 // Build markdown from decomposed fields
 const buildPromptMarkdown = (fields) => {
@@ -80,6 +96,7 @@ createApp({
     const newVersionOutputFormat = ref("");
     const newVersionExamples = ref("");
     const saveStatus        = ref("");
+    const deleteStatus      = ref("");
 
     /* optimizer */
     const createOptimizeMenuOpen = ref(false);
@@ -93,8 +110,12 @@ createApp({
     const optimizedDraft = ref(emptyPromptData());
     const optimizeInputSource = ref("create");
     const optimizeTargetPrompt = ref(null);
+    const optimizeEndpoint = ref("/optimize/greaterprompt");
     const optimizeConfig = ref(defaultOptimizeConfig());
     const optimizeConfigStatus = ref("");
+    const availableLlmModels = ref([...defaultLlmModelsByProvider.ollama]);
+    const llmModelsLoading = ref(false);
+    const llmModelsLoadError = ref("");
 
     const fetchPrompts = async (page = browsePage.value) => {
       browsePage.value = Math.max(1, page);
@@ -105,7 +126,12 @@ createApp({
       p.set("offset", String((browsePage.value - 1) * browsePageSize.value));
       const q   = p.toString();
       const res = await fetch("/prompts" + (q ? "?" + q : ""));
-      if (!res.ok) return;
+      if (!res.ok) {
+        console.error("fetchPrompts failed:", res.status, res.statusText);
+        items.value = [];
+        browseTotalItems.value = 0;
+        return;
+      }
       items.value = await res.json();
       browseTotalItems.value = Number(res.headers.get("X-Total-Count") || items.value.length || 0);
     };
@@ -145,6 +171,7 @@ createApp({
         newVersionRole.value = ""; newVersionTask.value = ""; newVersionContext.value = "";
         newVersionConstraints.value = ""; newVersionOutputFormat.value = ""; newVersionExamples.value = "";
         saveStatus.value = "";
+        deleteStatus.value = "";
         return;
       }
       expandedKey.value       = k;
@@ -157,8 +184,31 @@ createApp({
       newVersionOutputFormat.value = p.output_format || "";
       newVersionExamples.value = p.examples || "";
       saveStatus.value        = "";
+      deleteStatus.value      = "";
       openVersionKey.value    = null;
       await loadVersions(p);
+    };
+
+    const deletePrompt = async (p) => {
+      deleteStatus.value = "";
+      const confirmed = window.confirm(`Delete prompt ${p.project} / ${p.name}? This cannot be undone.`);
+      if (!confirmed) return;
+
+      const res = await fetch("/prompts/" + p.project + "/" + p.name, {
+        method: "DELETE",
+      });
+
+      if (!res.ok) {
+        deleteStatus.value = "Delete failed (" + res.status + ")";
+        return;
+      }
+
+      deleteStatus.value = "Prompt deleted";
+      expandedKey.value = null;
+      expandedVersions.value = [];
+      openVersionKey.value = null;
+      editTagsMode.value = false;
+      await fetchPrompts();
     };
 
     const saveNewVersion = async (p) => {
@@ -237,6 +287,82 @@ createApp({
       examples: fields.examples || null,
     });
 
+    const getDefaultProviderModels = (provider) => {
+      const key = String(provider || "").toLowerCase();
+      return [...(defaultLlmModelsByProvider[key] || [])];
+    };
+
+    const getProviderConfig = (provider) => {
+      const key = String(provider || "").toLowerCase();
+      return llmProviderConfigs[key] || llmProviderConfigs.ollama;
+    };
+
+    const getProviderLabel = (provider) => {
+      return getProviderConfig(provider).label || provider;
+    };
+
+    const getProviderDefaultBaseUrl = (provider) => {
+      return getProviderConfig(provider).baseUrl || "http://127.0.0.1:11434";
+    };
+
+    const updateProviderBaseUrl = (provider = optimizeConfig.value.llm_provider) => {
+      const key = String(provider || "").toLowerCase();
+      if (key === "ollama") {
+        optimizeConfig.value.llm_base_url = getProviderDefaultBaseUrl(key);
+      }
+    };
+
+    const modelRequiresToken = (provider = optimizeConfig.value.llm_provider) => {
+      const key = String(provider || "").toLowerCase();
+      return ["openai", "anthropic"].includes(key);
+    };
+
+    const loadAvailableLlmModels = async (provider = optimizeConfig.value.llm_provider) => {
+      llmModelsLoading.value = true;
+      llmModelsLoadError.value = "";
+
+      const selectedProvider = String(provider || "ollama").toLowerCase();
+      const fallbackModels = getDefaultProviderModels(selectedProvider);
+
+      try {
+        const params = new URLSearchParams();
+        if ((optimizeConfig.value.llm_base_url || "").trim()) {
+          params.set("base_url", optimizeConfig.value.llm_base_url.trim());
+        }
+        if ((optimizeConfig.value.llm_api_token || "").trim()) {
+          params.set("api_token", optimizeConfig.value.llm_api_token.trim());
+        }
+        params.set("timeout_seconds", "5");
+
+        const res = await fetch(`/optimize/providers/${encodeURIComponent(selectedProvider)}/models?${params.toString()}`);
+        if (!res.ok) {
+          llmModelsLoadError.value = `Failed to load provider models (${res.status})`;
+          availableLlmModels.value = fallbackModels;
+        } else {
+          const discovered = await res.json();
+          const clean = Array.isArray(discovered)
+            ? discovered.filter((m) => typeof m === "string" && m.trim())
+            : [];
+          availableLlmModels.value = clean.length ? clean : fallbackModels;
+          if (!clean.length) {
+            llmModelsLoadError.value = "No models discovered for selected provider. Showing fallback list.";
+          }
+        }
+      } catch (err) {
+        llmModelsLoadError.value = "Unable to connect to provider for model discovery.";
+        availableLlmModels.value = fallbackModels;
+      } finally {
+        const currentModel = (optimizeConfig.value.llm_model || "").trim();
+        if (currentModel && !availableLlmModels.value.includes(currentModel)) {
+          availableLlmModels.value = [currentModel, ...availableLlmModels.value];
+        }
+        if (!optimizeConfig.value.llm_model && availableLlmModels.value.length) {
+          optimizeConfig.value.llm_model = availableLlmModels.value[0];
+        }
+        llmModelsLoading.value = false;
+      }
+    };
+
     const loadOptimizeConfig = async () => {
       const res = await fetch("/optimize/config");
       if (!res.ok) {
@@ -254,10 +380,13 @@ createApp({
         llm_model: cfg.runtime_llm_model || cfg.effective_llm_model || "qwen2.5:0.5b",
         llm_base_url: cfg.runtime_llm_base_url || cfg.effective_llm_base_url || "http://127.0.0.1:11434",
         llm_timeout_seconds: cfg.runtime_llm_timeout_seconds || cfg.effective_llm_timeout_seconds || 300,
+        llm_api_token: "",  // Never populate token from response for security
+        effective_has_llm_api_token: cfg.effective_has_llm_api_token || false,
       };
+      await loadAvailableLlmModels(optimizeConfig.value.llm_provider);
     };
 
-    const saveOptimizeConfig = async () => {
+    const persistOptimizeConfig = async (showSuccessMessage = true) => {
       optimizeConfigStatus.value = "";
       const payload = {
         model_id: optimizeConfig.value.model_id || null,
@@ -267,6 +396,7 @@ createApp({
         llm_model: optimizeConfig.value.llm_model || "qwen2.5:0.5b",
         llm_base_url: optimizeConfig.value.llm_base_url || "http://127.0.0.1:11434",
         llm_timeout_seconds: Number(optimizeConfig.value.llm_timeout_seconds) || 300,
+        llm_api_token: optimizeConfig.value.llm_api_token || null,
       };
       const res = await fetch("/optimize/config", {
         method: "PUT",
@@ -275,10 +405,17 @@ createApp({
       });
       if (!res.ok) {
         optimizeConfigStatus.value = "Failed to save optimize config (" + res.status + ")";
-        return;
+        return false;
       }
-      optimizeConfigStatus.value = "Optimize config saved";
+      if (showSuccessMessage) {
+        optimizeConfigStatus.value = "Optimize config saved";
+      }
       await loadOptimizeConfig();
+      return true;
+    };
+
+    const saveOptimizeConfig = async () => {
+      await persistOptimizeConfig(true);
     };
 
     const optimizePrompt = async (endpoint, fields, source, target = null) => {
@@ -287,6 +424,7 @@ createApp({
       optimizerEngine.value = "";
       optimizerNotes.value = [];
       optimizedMarkdown.value = "";
+      optimizeEndpoint.value = endpoint;
       optimizeInputSource.value = source;
       optimizeTargetPrompt.value = target;
       optimizerModalOpen.value = true;
@@ -316,6 +454,22 @@ createApp({
         output_format: data.optimized.output_format || "",
         examples: data.optimized.examples || "",
       };
+    };
+
+    const reoptimizePrompt = async () => {
+      optimizerError.value = "";
+      const saved = await persistOptimizeConfig(false);
+      if (!saved) {
+        optimizerError.value = "Reoptimize failed: unable to save optimization config.";
+        return;
+      }
+
+      await optimizePrompt(
+        optimizeEndpoint.value,
+        optimizedDraft.value,
+        optimizeInputSource.value,
+        optimizeTargetPrompt.value
+      );
     };
 
     const optimizeFromCreate = async () => {
@@ -413,12 +567,14 @@ createApp({
       createOptimizeMenuOpen, browseOptimizeMenuKey,
       optimizerModalOpen, optimizerLoading, optimizerError, optimizerEngine, optimizerNotes,
       optimizedMarkdown, optimizedDraft,
-      optimizeConfig, optimizeConfigStatus, llmModelOptions, gpProfileOptions,
+      optimizeConfig, optimizeConfigStatus, llmProviderOptions, availableLlmModels, llmModelsLoading, llmModelsLoadError, gpProfileOptions,
       key, togglePrompt, saveNewVersion, saveTags, createPrompt,
+      deletePrompt,
       optimizeFromCreate, optimizeFromCreateLLM,
       optimizeFromBrowse, optimizeFromBrowseLLM,
-      applyOptimizedPrompt, saveOptimizeConfig,
+      applyOptimizedPrompt, reoptimizePrompt, saveOptimizeConfig, loadAvailableLlmModels, updateProviderBaseUrl, getProviderLabel, modelRequiresToken,
       md, buildPromptMarkdown,
+      deleteStatus,
     };
   },
 
@@ -519,7 +675,9 @@ createApp({
                     <button class="split-menu-item" @click.stop="optimizeFromBrowseLLM(p)">Optimize Prompt with LLM</button>
                   </div>
                 </div>
+                <button class="danger" @click.stop="deletePrompt(p)">Delete Prompt</button>
               </div>
+              <p v-if="deleteStatus" :class="deleteStatus.includes('failed') ? 'status-err' : 'status-ok'">{{ deleteStatus }}</p>
             </div>
 
             <!-- New version editor -->
@@ -532,7 +690,7 @@ createApp({
                 </div>
                 <div class="field">
                   <label>Task (required)</label>
-                  <input v-model="newVersionTask" placeholder="Generate a summary of..." />
+                  <textarea v-model="newVersionTask" style="min-height:80px" placeholder="Generate a summary of..."></textarea>
                 </div>
               </div>
               <div class="field">
@@ -618,7 +776,7 @@ createApp({
           </div>
           <div class="field">
             <label>Task (required)</label>
-            <input v-model="form.task" placeholder="Generate a summary of..." />
+            <textarea v-model="form.task" style="min-height:80px" placeholder="Generate a summary of..."></textarea>
           </div>
         </div>
         <div class="field">
@@ -677,48 +835,74 @@ createApp({
 
           <div class="opt-config-box">
             <h4 style="margin:0 0 8px">Optimization Config</h4>
-            <div class="create-grid">
-              <div class="field">
-                <label>LLM Provider</label>
-                <input v-model="optimizeConfig.llm_provider" placeholder="ollama" />
+            <div class="opt-settings-group">
+              <h5>LLM Settings</h5>
+              <div class="create-grid">
+                <div class="field">
+                  <label>LLM Provider</label>
+                  <select class="select-pretty" v-model="optimizeConfig.llm_provider" @change="updateProviderBaseUrl(optimizeConfig.llm_provider); loadAvailableLlmModels(optimizeConfig.llm_provider)">
+                    <option v-for="provider in llmProviderOptions" :key="provider" :value="provider">{{ getProviderLabel(provider) }}</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <div style="display: flex; align-items: center; gap: 8px;">
+                    <label style="flex: 1;">LLM Model</label>
+                    <button @click="loadAvailableLlmModels(optimizeConfig.llm_provider)" :disabled="llmModelsLoading" style="padding: 4px 8px; cursor: pointer; font-size: 0.9rem; white-space: nowrap;" title="Refresh available models for current API key">
+                      {{ llmModelsLoading ? "Loading..." : "Refresh" }}
+                    </button>
+                  </div>
+                  <select class="select-pretty" v-model="optimizeConfig.llm_model" :disabled="llmModelsLoading">
+                    <option v-for="m in availableLlmModels" :key="m" :value="m">{{ m }}</option>
+                  </select>
+                </div>
               </div>
-              <div class="field">
-                <label>GreaterPrompt Profile</label>
-                <select v-model="optimizeConfig.gp_profile">
-                  <option v-for="p in gpProfileOptions" :key="p" :value="p">{{ p }}</option>
-                </select>
+              <div class="create-grid">
+                <div class="field">
+                  <label>Base URL</label>
+                  <input v-model="optimizeConfig.llm_base_url" @change="loadAvailableLlmModels(optimizeConfig.llm_provider)" placeholder="http://127.0.0.1:11434" />
+                </div>
+                <div class="field" v-if="modelRequiresToken()" style="max-width:220px">
+                  <label>API Token</label>
+                  <input type="password" v-model="optimizeConfig.llm_api_token" :placeholder="optimizeConfig.effective_has_llm_api_token ? 'Token already set' : 'Enter your API token'" />
+                  <p v-if="optimizeConfig.effective_has_llm_api_token" style="margin:4px 0 0;color:var(--muted);font-size:0.82rem">✓ Token is configured</p>
+                </div>
+                <div class="field" v-else style="max-width:220px">
+                  <label>LLM Timeout (seconds)</label>
+                  <input type="number" min="5" v-model.number="optimizeConfig.llm_timeout_seconds" />
+                </div>
               </div>
+              <div class="create-grid" v-if="modelRequiresToken()">
+                <div class="field" style="max-width:220px">
+                  <label>LLM Timeout (seconds)</label>
+                  <input type="number" min="5" v-model.number="optimizeConfig.llm_timeout_seconds" />
+                </div>
+              </div>
+              <p v-if="llmModelsLoading" style="margin:4px 0 0;color:var(--muted);font-size:0.84rem">Loading available models...</p>
+              <p v-if="llmModelsLoadError" style="margin:4px 0 0;color:var(--muted);font-size:0.84rem">{{ llmModelsLoadError }}</p>
             </div>
-            <div class="create-grid">
-              <div class="field">
-                <label>LLM Model</label>
-                <input v-model="optimizeConfig.llm_model" list="llm-model-options" placeholder="qwen2.5:0.5b" />
-                <datalist id="llm-model-options">
-                  <option v-for="m in llmModelOptions" :key="m" :value="m"></option>
-                </datalist>
+
+            <div class="opt-settings-group opt-settings-group-gp">
+              <h5>GreaterPrompt Settings</h5>
+              <div class="create-grid">
+                <div class="field">
+                  <label>GreaterPrompt Profile</label>
+                  <select class="select-pretty" v-model="optimizeConfig.gp_profile">
+                    <option v-for="p in gpProfileOptions" :key="p" :value="p">{{ p }}</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label>GreaterPrompt Model ID (optional)</label>
+                  <input v-model="optimizeConfig.model_id" placeholder="meta-llama/..." />
+                </div>
               </div>
-              <div class="field"></div>
-            </div>
-            <div class="create-grid">
-              <div class="field">
-                <label>Ollama Base URL</label>
-                <input v-model="optimizeConfig.llm_base_url" placeholder="http://127.0.0.1:11434" />
+              <div class="field" style="max-width:180px">
+                <label>Gradient Rounds</label>
+                <input type="number" min="1" v-model.number="optimizeConfig.rounds" />
               </div>
-              <div class="field">
-                <label>GreaterPrompt Model ID (optional)</label>
-                <input v-model="optimizeConfig.model_id" placeholder="meta-llama/..." />
-              </div>
-            </div>
-            <div class="field" style="max-width:180px">
-              <label>Gradient Rounds</label>
-              <input type="number" min="1" v-model.number="optimizeConfig.rounds" />
-            </div>
-            <div class="field" style="max-width:220px">
-              <label>LLM Timeout (seconds)</label>
-              <input type="number" min="5" v-model.number="optimizeConfig.llm_timeout_seconds" />
             </div>
             <div class="btn-row" style="margin-top:6px">
               <button class="secondary" @click="saveOptimizeConfig">Save Config</button>
+              <button class="secondary" :disabled="optimizerLoading" @click="reoptimizePrompt">Reoptimize</button>
             </div>
             <p v-if="optimizeConfigStatus" :class="optimizeConfigStatus.includes('Failed') ? 'status-err' : 'status-ok'">{{ optimizeConfigStatus }}</p>
             <p style="margin:6px 0 0;color:var(--muted);font-size:0.84rem">

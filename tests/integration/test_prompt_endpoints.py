@@ -94,3 +94,23 @@ def test_list_prompts_supports_optional_limit_and_offset(client, sample_prompt_p
     assert paged_response.headers["X-Total-Count"] == "3"
     assert paged_items[0]["name"] == "checkout-system-1"
     assert paged_items[1]["name"] == "checkout-system-2"
+
+
+def test_delete_prompt_removes_it_from_list(client, sample_prompt_payload):  # type: ignore[no-untyped-def]
+    create_response = client.post("/prompts", json=sample_prompt_payload)
+    assert create_response.status_code == 200
+
+    delete_response = client.delete("/prompts/payments/checkout-system")
+    assert delete_response.status_code == 204
+
+    get_response = client.get("/prompts/payments/checkout-system")
+    assert get_response.status_code == 404
+
+    list_response = client.get("/prompts")
+    assert list_response.status_code == 200
+    assert list_response.json() == []
+
+
+def test_delete_missing_prompt_returns_not_found(client):  # type: ignore[no-untyped-def]
+    delete_response = client.delete("/prompts/payments/missing")
+    assert delete_response.status_code == 404

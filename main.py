@@ -16,6 +16,7 @@ from models import Prompt
 from optimizer_service import (
     clear_runtime_model_id,
     get_runtime_optimizer_config,
+    list_available_llm_models,
     optimize_with_greaterprompt,
     optimize_with_llm,
     set_runtime_optimizer_config,
@@ -145,13 +146,32 @@ def list_prompts(
     response: Response,
     project: str | None = None,
     tag: str | None = None,
-    limit: int | None = Query(None, ge=1, description="Optional max number of prompts to return"),
-    offset: int | None = Query(None, ge=0, description="Optional number of prompts to skip"),
+    limit: str | None = None,
+    offset: str | None = None,
     db: Session = Depends(get_db),
 ) -> list[PromptOut]:
+    # Convert string parameters to int safely
+    limit_int: int | None = None
+    offset_int: int | None = None
+    try:
+        if limit:
+            limit_int = int(limit)
+            if limit_int < 1:
+                limit_int = 1
+    except (ValueError, TypeError):
+        limit_int = None
+    
+    try:
+        if offset:
+            offset_int = int(offset)
+            if offset_int < 0:
+                offset_int = 0
+    except (ValueError, TypeError):
+        offset_int = None
+    
     total_count = crud.count_prompts(db, project=project, tag=tag)
     response.headers["X-Total-Count"] = str(total_count)
-    prompts = crud.list_prompts(db, project=project, tag=tag, limit=limit, offset=offset)
+    prompts = crud.list_prompts(db, project=project, tag=tag, limit=limit_int, offset=offset_int)
     return [to_prompt_out(db, prompt) for prompt in prompts]
 
 
@@ -191,6 +211,18 @@ def get_prompt(project: str, name: str, db: Session = Depends(get_db)) -> Prompt
     return to_prompt_out(db, prompt)
 
 
+@app.delete("/prompts/{project}/{name}", status_code=204)
+def delete_prompt(project: str, name: str, db: Session = Depends(get_db)) -> Response:
+    logger.info("prompt.delete project={} name={}", project, name)
+    prompt = crud.get_prompt(db, name, project)
+    if not prompt:
+        logger.warning("prompt.delete.not_found project={} name={}", project, name)
+        raise HTTPException(404, "Prompt not found")
+
+    crud.delete_prompt(db, prompt)
+    return Response(status_code=204)
+
+
 @app.put("/prompts/{project}/{name}", response_model=PromptVersionOut)
 def update_prompt(project: str, name: str, data: PromptUpdate, db: Session = Depends(get_db)) -> PromptVersionOut:
     logger.info("prompt.update project={} name={}", project, name)
@@ -214,7 +246,7 @@ def update_prompt(project: str, name: str, data: PromptUpdate, db: Session = Dep
             examples=data.examples,
         )
     except ValueError as exc:
-        logger.warning("prompt.update.duplicate_content project={} name={}", project, name)
+        logger.warning("prompt.update.conflict project={} name={} error={}", project, name, str(exc))
         raise HTTPException(409, str(exc)) from exc
     return PromptVersionOut(
         version=new_version.version,
@@ -233,7 +265,11 @@ def update_prompt_tags(project: str, name: str, data: PromptTagsUpdate, db: Sess
     if not prompt:
         raise HTTPException(404, "Prompt not found")
 
-    prompt = crud.set_prompt_tags(db, prompt, data.tags)
+    crud.set_prompt_tags(db, prompt, data.tags)
+    # Reload prompt from database to ensure all relationships are properly populated
+    prompt = crud.get_prompt(db, name, project)
+    if not prompt:
+        raise HTTPException(404, "Prompt not found after update")
     return to_prompt_out(db, prompt)
 
 
@@ -359,6 +395,7 @@ def update_optimize_config(data: OptimizeConfigUpdate) -> OptimizeConfigOut:
             or data.llm_model is not None
             or data.llm_base_url is not None
             or data.llm_timeout_seconds is not None
+            or data.llm_api_token is not None
         ):
             cfg = set_runtime_optimizer_config(
                 gp_profile=data.gp_profile,
@@ -366,6 +403,7 @@ def update_optimize_config(data: OptimizeConfigUpdate) -> OptimizeConfigOut:
                 llm_model=data.llm_model,
                 llm_base_url=data.llm_base_url,
                 llm_timeout_seconds=data.llm_timeout_seconds,
+                llm_api_token=data.llm_api_token,
             )
         return OptimizeConfigOut(**cfg)
 
@@ -377,5 +415,17 @@ def update_optimize_config(data: OptimizeConfigUpdate) -> OptimizeConfigOut:
         llm_model=data.llm_model,
         llm_base_url=data.llm_base_url,
         llm_timeout_seconds=data.llm_timeout_seconds,
+        llm_api_token=data.llm_api_token,
     )
     return OptimizeConfigOut(**cfg)
+
+
+@app.get("/optimize/providers/{provider}/models", response_model=list[str])
+def get_provider_models(
+    provider: str,
+    base_url: str | None = Query(None, description="Optional provider base URL override"),
+    api_token: str | None = Query(None, description="Optional API token for authentication"),
+    timeout_seconds: int = Query(5, ge=1, le=30, description="Timeout in seconds for provider model discovery"),
+) -> list[str]:
+    models = list_available_llm_models(provider, base_url=base_url, timeout_seconds=timeout_seconds, api_token=api_token)
+    return models

@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -5,9 +7,45 @@ from threading import Lock
 from typing import Any
 
 import requests
+from cryptography.fernet import Fernet
 from loguru import logger
 
 _runtime_config_lock = Lock()
+
+# Token encryption utilities
+def _get_encryption_key() -> bytes:
+    """Generate or retrieve a consistent encryption key based on machine/app."""
+    # Use a combination of hostname and a static salt for key derivation
+    # This ensures the same token can be decrypted across restarts
+    machine_id = os.getenv("PROMPTMAN_KEY", os.uname().nodename if hasattr(os, "uname") else "default")
+    key_material = hashlib.sha256(machine_id.encode()).digest()
+    # Fernet requires a 32-byte key, base64 encoded
+    return base64.urlsafe_b64encode(key_material)
+
+_cipher = Fernet(_get_encryption_key())
+
+def _encrypt_token(token: str | None) -> str | None:
+    """Encrypt a token for secure storage."""
+    if not token or not token.strip():
+        return None
+    try:
+        encrypted = _cipher.encrypt(token.strip().encode())
+        return encrypted.decode('utf-8')
+    except Exception as e:
+        logger.warning(f"Token encryption failed: {e}")
+        return None
+
+def _decrypt_token(encrypted_token: str | None) -> str | None:
+    """Decrypt a stored token."""
+    if not encrypted_token:
+        return None
+    try:
+        decrypted = _cipher.decrypt(encrypted_token.encode())
+        return decrypted.decode('utf-8')
+    except Exception as e:
+        logger.warning(f"Token decryption failed: {e}")
+        return None
+
 _ALLOWED_GP_PROFILES = {"fast", "quality"}
 _GREATERPROMPT_PROFILE_CONFIGS: dict[str, dict[str, Any]] = {
     "fast": {
@@ -47,6 +85,7 @@ _runtime_optimize_config: dict[str, Any] = {
     "llm_model": "qwen2.5:0.5b",
     "llm_base_url": "http://127.0.0.1:11434",
     "llm_timeout_seconds": 300,
+    "llm_api_token_encrypted": None,  # Encrypted token storage only
 }
 
 
@@ -72,6 +111,7 @@ def set_runtime_optimizer_config(
     llm_model: str | None = None,
     llm_base_url: str | None = None,
     llm_timeout_seconds: int | None = None,
+    llm_api_token: str | None = None,
 ) -> dict[str, Any]:
     with _runtime_config_lock:
         if model_id is not None:
@@ -89,8 +129,12 @@ def set_runtime_optimizer_config(
             _runtime_optimize_config["llm_base_url"] = llm_base_url.strip() or "http://127.0.0.1:11434"
         if llm_timeout_seconds is not None:
             _runtime_optimize_config["llm_timeout_seconds"] = max(5, int(llm_timeout_seconds))
+        if llm_api_token is not None:
+            # Encrypt and store token
+            encrypted = _encrypt_token(llm_api_token)
+            _runtime_optimize_config["llm_api_token_encrypted"] = encrypted
     logger.info(
-        "optimize.config.runtime_set model_id={} rounds={} gp_profile={} llm_provider={} llm_model={} llm_base_url={} llm_timeout_seconds={}",
+        "optimize.config.runtime_set model_id={} rounds={} gp_profile={} llm_provider={} llm_model={} llm_base_url={} llm_timeout_seconds={} has_api_token={}",
         model_id,
         rounds,
         gp_profile,
@@ -98,6 +142,7 @@ def set_runtime_optimizer_config(
         llm_model,
         llm_base_url,
         llm_timeout_seconds,
+        llm_api_token is not None and len(llm_api_token.strip()) > 0,
     )
     return get_runtime_optimizer_config()
 
@@ -118,6 +163,7 @@ def get_runtime_optimizer_config() -> dict[str, Any]:
         runtime_llm_model = _runtime_optimize_config["llm_model"]
         runtime_llm_base_url = _runtime_optimize_config["llm_base_url"]
         runtime_llm_timeout_seconds = _runtime_optimize_config["llm_timeout_seconds"]
+        runtime_llm_api_token_encrypted = _runtime_optimize_config.get("llm_api_token_encrypted")
 
     env_model_id = os.getenv("GREATERPROMPT_MODEL_ID", "").strip() or None
     env_rounds_raw = os.getenv("GREATERPROMPT_ROUNDS", "").strip()
@@ -127,6 +173,7 @@ def get_runtime_optimizer_config() -> dict[str, Any]:
     env_llm_provider = os.getenv("OPTIMIZE_LLM_PROVIDER", "").strip().lower() or None
     env_llm_model = os.getenv("OPTIMIZE_LLM_MODEL", "").strip() or None
     env_llm_base_url = os.getenv("OLLAMA_BASE_URL", "").strip() or None
+    env_llm_api_token_encrypted = os.getenv("OPTIMIZE_LLM_API_TOKEN", "").strip() or None
     env_llm_timeout_raw = os.getenv("OPTIMIZE_LLM_TIMEOUT_SECONDS", "").strip()
     env_llm_timeout_seconds = int(env_llm_timeout_raw) if env_llm_timeout_raw.isdigit() else None
 
@@ -138,6 +185,8 @@ def get_runtime_optimizer_config() -> dict[str, Any]:
     effective_llm_model = runtime_llm_model or env_llm_model or "qwen2.5:0.5b"
     effective_llm_base_url = runtime_llm_base_url or env_llm_base_url or "http://127.0.0.1:11434"
     effective_llm_timeout_seconds = runtime_llm_timeout_seconds or env_llm_timeout_seconds or 300
+    # Decrypt token for use (never return plaintext in response)
+    effective_llm_api_token = _decrypt_token(runtime_llm_api_token_encrypted or env_llm_api_token_encrypted)
 
     return {
         "runtime_model_id": runtime_model_id,
@@ -147,6 +196,7 @@ def get_runtime_optimizer_config() -> dict[str, Any]:
         "runtime_llm_model": runtime_llm_model,
         "runtime_llm_base_url": runtime_llm_base_url,
         "runtime_llm_timeout_seconds": runtime_llm_timeout_seconds,
+        "runtime_has_llm_api_token": runtime_llm_api_token_encrypted is not None,
         "env_model_id": env_model_id,
         "env_rounds": env_rounds,
         "env_gp_profile": env_gp_profile,
@@ -154,6 +204,7 @@ def get_runtime_optimizer_config() -> dict[str, Any]:
         "env_llm_model": env_llm_model,
         "env_llm_base_url": env_llm_base_url,
         "env_llm_timeout_seconds": env_llm_timeout_seconds,
+        "env_has_llm_api_token": env_llm_api_token_encrypted is not None,
         "effective_model_id": effective_model_id,
         "effective_rounds": effective_rounds,
         "effective_gp_profile": effective_gp_profile,
@@ -162,6 +213,8 @@ def get_runtime_optimizer_config() -> dict[str, Any]:
         "effective_llm_model": effective_llm_model,
         "effective_llm_base_url": effective_llm_base_url,
         "effective_llm_timeout_seconds": effective_llm_timeout_seconds,
+        "effective_has_llm_api_token": effective_llm_api_token is not None,
+        "effective_llm_api_token": effective_llm_api_token,  # Internal use only, NOT sent to frontend
         "gradient_enabled": bool(effective_model_id),
     }
 
@@ -458,3 +511,91 @@ def optimize_with_llm(fields: dict[str, str | None]) -> OptimizationResult:
         optimized_markdown=_build_full_prompt(fallback),
         notes=[f"Unsupported LLM provider: {provider}", "Fallback optimization was used."],
     )
+
+
+def list_available_llm_models(
+    provider: str,
+    *,
+    base_url: str | None = None,
+    timeout_seconds: int = 5,
+    api_token: str | None = None,
+) -> list[str]:
+    normalized_provider = (provider or "").strip().lower()
+    
+    if normalized_provider == "ollama":
+        cfg = get_runtime_optimizer_config()
+        resolved_base_url = (base_url or cfg.get("effective_llm_base_url") or "http://127.0.0.1:11434").strip().rstrip("/")
+
+        try:
+            resp = requests.get(f"{resolved_base_url}/api/tags", timeout=max(1, int(timeout_seconds)))
+            resp.raise_for_status()
+            body = resp.json()
+            raw_models = body.get("models", []) if isinstance(body, dict) else []
+
+            model_names: list[str] = []
+            for item in raw_models:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("name")
+                if isinstance(name, str) and name.strip():
+                    model_names.append(name.strip())
+
+            seen: set[str] = set()
+            unique_models: list[str] = []
+            for model_name in model_names:
+                if model_name in seen:
+                    continue
+                seen.add(model_name)
+                unique_models.append(model_name)
+
+            return unique_models
+        except Exception:
+            logger.exception(
+                "optimize.llm.list_models.error provider={} base_url={}",
+                normalized_provider,
+                resolved_base_url,
+            )
+            return []
+    
+    elif normalized_provider == "openai":
+        # OpenAI requires API token to list models
+        token = (api_token or "").strip()
+        if not token:
+            logger.warning("openai model discovery requires api_token parameter")
+            return []
+        
+        cfg = get_runtime_optimizer_config()
+        resolved_base_url = (base_url or cfg.get("effective_llm_base_url") or "https://api.openai.com/v1").strip().rstrip("/")
+        
+        try:
+            headers = {"Authorization": f"Bearer {token}"}
+            resp = requests.get(f"{resolved_base_url}/models", headers=headers, timeout=max(1, int(timeout_seconds)))
+            resp.raise_for_status()
+            body = resp.json()
+            raw_models = body.get("data", []) if isinstance(body, dict) else []
+            
+            model_names: list[str] = []
+            for item in raw_models:
+                if not isinstance(item, dict):
+                    continue
+                model_id = item.get("id")
+                if isinstance(model_id, str) and model_id.strip():
+                    model_names.append(model_id.strip())
+            
+            return sorted(model_names)
+        except Exception as e:
+            logger.exception(
+                "optimize.llm.list_models.error provider={} base_url={} error={}",
+                normalized_provider,
+                resolved_base_url,
+                str(e),
+            )
+            return []
+    
+    elif normalized_provider == "anthropic":
+        # Anthropic has a fixed set of models; token is for auth but models don't vary
+        return ["claude-3-opus", "claude-3-sonnet", "claude-3-haiku"]
+    
+    else:
+        logger.warning("Unknown provider for model discovery: {}", normalized_provider)
+        return []
