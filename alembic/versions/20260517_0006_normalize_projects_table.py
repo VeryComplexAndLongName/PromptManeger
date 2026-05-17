@@ -74,6 +74,7 @@ def upgrade() -> None:
     with op.batch_alter_table("prompts") as batch_op:
         batch_op.drop_constraint("uq_prompt_name_project", type_="unique")
         batch_op.drop_constraint("ck_prompts_project_not_blank", type_="check")
+        batch_op.drop_index("ix_prompts_project")
         batch_op.create_foreign_key("fk_prompts_project_id_projects", "projects", ["project_id"], ["id"], ondelete="CASCADE")
         batch_op.alter_column("project_id", existing_type=sa.Integer(), nullable=False)
         batch_op.drop_column("project")
@@ -127,6 +128,7 @@ def downgrade() -> None:
         batch_op.alter_column("project", existing_type=sa.String(), nullable=False)
         batch_op.create_check_constraint("ck_prompts_project_not_blank", "trim(project) <> ''")
         batch_op.create_unique_constraint("uq_prompt_name_project", ["name", "project"])
+        batch_op.create_index("ix_prompts_project", ["project"], unique=False)
         batch_op.drop_column("project_id")
 
     with op.batch_alter_table("project_access") as batch_op:
