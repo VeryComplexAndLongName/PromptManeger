@@ -1,6 +1,6 @@
 [project]
 name = "prompt-man"
-version = "0.1.1"
+version = "0.1.2"
 description = "Prompt Man: FastAPI + Vue app for storing, versioning, and optimizing prompts"
 requires-python = ">=3.11"
 dependencies = [
