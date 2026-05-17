@@ -1,5 +1,4 @@
 import datetime
-import importlib.metadata
 import logging
 import os
 import sys
@@ -54,11 +53,6 @@ from schemas import (
 
 
 def _resolve_app_version() -> str:
-    try:
-        return importlib.metadata.version("prompt-man")
-    except importlib.metadata.PackageNotFoundError:
-        pass
-
     pyproject_path = Path(__file__).resolve().parent / "pyproject.toml"
     if pyproject_path.exists():
         try:
