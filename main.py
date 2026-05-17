@@ -22,9 +22,8 @@ from database import SessionLocal, init_database
 from models import Prompt, User
 from optimizer_service import (
     build_optimizer_config,
-    list_available_llm_models,
-    optimize_with_greaterprompt,
-    optimize_with_llm,
+    list_available_models,
+    optimize_prompt_with_active_backend,
 )
 from schemas import (
     AuthResponse,
@@ -95,10 +94,10 @@ def _console_log_format(record: dict) -> str:
     elif message.startswith("request.error") or message.startswith("request.exception"):
         badge = "<red>HTTP ERR</red>"
         message_color = "<red>"
-    elif message.startswith("optimize.greaterprompt") or message.startswith("optimize.gradient"):
+    elif message.startswith("optimize.gradient"):
         badge = "<magenta>GP      </magenta>"
         message_color = "<magenta>"
-    elif message.startswith("optimize.llm"):
+    elif message.startswith("optimize.provider"):
         badge = "<yellow>LLM     </yellow>"
         message_color = "<yellow>"
     elif message.startswith("optimize.config"):
@@ -621,35 +620,11 @@ def get_version(project: str, name: str, version: int, db: Session = Depends(get
     return to_prompt_version_out(db, v)
 
 
-@app.post("/optimize/greaterprompt", response_model=PromptOptimizeResponse)
+@app.post("/optimize", response_model=PromptOptimizeResponse)
 def optimize_prompt(data: PromptData, db: Session = Depends(get_db), current_user: User = Depends(auth_service.require_write_access)) -> PromptOptimizeResponse:
-    logger.info("optimize.greaterprompt.start")
-    result = optimize_with_greaterprompt(data.model_dump(), get_personal_config(db, current_user))
-    logger.info("optimize.greaterprompt.done engine={}", result.engine)
-    optimized_dict = result.optimized_fields
-    if not isinstance(optimized_dict, dict):
-        optimized_dict = {}
-    optimized = PromptData(
-        role=optimized_dict.get("role"),
-        task=optimized_dict.get("task") or "",
-        context=optimized_dict.get("context"),
-        constraints=optimized_dict.get("constraints"),
-        output_format=optimized_dict.get("output_format"),
-        examples=optimized_dict.get("examples"),
-    )
-    return PromptOptimizeResponse(
-        engine=result.engine,
-        optimized=optimized,
-        optimized_markdown=result.optimized_markdown,
-        notes=result.notes,
-    )
-
-
-@app.post("/optimize/llm", response_model=PromptOptimizeResponse)
-def optimize_prompt_llm(data: PromptData, db: Session = Depends(get_db), current_user: User = Depends(auth_service.require_write_access)) -> PromptOptimizeResponse:
-    logger.info("optimize.llm.start")
-    result = optimize_with_llm(data.model_dump(), get_personal_config(db, current_user))
-    logger.info("optimize.llm.done engine={}", result.engine)
+    logger.info("optimize.request.start")
+    result = optimize_prompt_with_active_backend(data.model_dump(), get_personal_config(db, current_user))
+    logger.info("optimize.request.done engine={}", result.engine)
     optimized_dict = result.optimized_fields
     if not isinstance(optimized_dict, dict):
         optimized_dict = {}
@@ -673,9 +648,8 @@ def optimize_prompt_llm(data: PromptData, db: Session = Depends(get_db), current
 def get_optimize_config(db: Session = Depends(get_db), current_user: User = Depends(auth_service.get_current_user)) -> OptimizeConfigOut:
     cfg = get_personal_config(db, current_user)
     logger.info(
-        "optimize.config.get effective_model_id={} effective_gp_profile={} effective_llm_model={}",
-        cfg.get("effective_model_id"),
-        cfg.get("effective_gp_profile"),
+        "optimize.config.get effective_llm_provider={} effective_llm_model={}",
+        cfg.get("effective_llm_provider"),
         cfg.get("effective_llm_model"),
     )
     return OptimizeConfigOut(**cfg)
@@ -684,12 +658,9 @@ def get_optimize_config(db: Session = Depends(get_db), current_user: User = Depe
 @app.put("/optimize/config", response_model=OptimizeConfigOut)
 def update_optimize_config(data: OptimizeConfigUpdate, db: Session = Depends(get_db), current_user: User = Depends(auth_service.require_write_access)) -> OptimizeConfigOut:
     logger.info(
-        "optimize.config.update clear_model_id={} model_id={} gp_profile={} llm_model={} rounds={}",
-        data.clear_model_id,
-        data.model_id,
-        data.gp_profile,
+        "optimize.config.update llm_provider={} llm_model={}",
+        data.llm_provider,
         data.llm_model,
-        data.rounds,
     )
     cfg = auth_service.update_personal_config(db, current_user, data.model_dump())
     return OptimizeConfigOut(**cfg)
@@ -704,7 +675,8 @@ def get_provider_models(
     db: Session = Depends(get_db),
     current_user: User = Depends(auth_service.get_current_user),
 ) -> list[str]:
-    models = list_available_llm_models(
+    logger.info("optimize.provider.models provider={}", provider)
+    models = list_available_models(
         provider,
         base_url=base_url,
         timeout_seconds=timeout_seconds,

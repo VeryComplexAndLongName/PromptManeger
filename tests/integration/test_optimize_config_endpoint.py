@@ -2,15 +2,11 @@ def test_get_and_update_optimize_config(client):  # type: ignore[no-untyped-def]
     get_response = client.get("/optimize/config")
     assert get_response.status_code == 200
     cfg = get_response.json()
-    assert cfg["effective_gp_profile"] in {"fast", "quality", "ultra"}
     assert cfg["effective_llm_provider"] == "ollama"
 
     put_response = client.put(
         "/optimize/config",
         json={
-            "model_id": "meta-llama/Llama-3.2-1B-Instruct",
-            "rounds": 4,
-            "gp_profile": "quality",
             "llm_provider": "ollama",
             "llm_model": "qwen2.5:0.5b",
             "llm_base_url": "http://127.0.0.1:11434",
@@ -19,24 +15,7 @@ def test_get_and_update_optimize_config(client):  # type: ignore[no-untyped-def]
     )
     assert put_response.status_code == 200
     updated = put_response.json()
-    assert updated["runtime_model_id"] == "meta-llama/Llama-3.2-1B-Instruct"
-    assert updated["runtime_rounds"] == 4
-    assert updated["runtime_gp_profile"] == "quality"
     assert updated["effective_llm_timeout_seconds"] == 450
-
-    clear_response = client.put(
-        "/optimize/config",
-        json={
-            "clear_model_id": True,
-            "gp_profile": "fast",
-            "rounds": 2,
-        },
-    )
-    assert clear_response.status_code == 200
-    cleared = clear_response.json()
-    assert cleared["runtime_model_id"] is None
-    assert cleared["effective_gp_profile"] == "fast"
-    assert cleared["effective_rounds"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -60,41 +39,38 @@ def test_update_config_api_token_never_returned_in_response(client):  # type: ig
     assert "supersecret" not in response.text
 
 
-def test_update_config_only_rounds_preserves_other_fields(client):  # type: ignore[no-untyped-def]
+def test_update_config_only_llm_model_preserves_other_fields(client):  # type: ignore[no-untyped-def]
     client.put("/optimize/config", json={"llm_model": "custom-model", "llm_provider": "ollama"})
-    response = client.put("/optimize/config", json={"rounds": 7})
+    response = client.put("/optimize/config", json={"llm_timeout_seconds": 120})
     assert response.status_code == 200
     cfg = response.json()
-    assert cfg["runtime_rounds"] == 7
+    assert cfg["effective_llm_timeout_seconds"] == 120
     assert cfg["runtime_llm_model"] == "custom-model"
 
 
-def test_clear_model_id_with_extra_fields(client):  # type: ignore[no-untyped-def]
-    client.put("/optimize/config", json={"model_id": "some-model", "rounds": 3})
+def test_update_config_llm_base_url(client):  # type: ignore[no-untyped-def]
     response = client.put(
         "/optimize/config",
-        json={"clear_model_id": True, "rounds": 6, "gp_profile": "quality"},
+        json={"llm_base_url": "http://my-ollama:11434"},
     )
     assert response.status_code == 200
     cfg = response.json()
-    assert cfg["runtime_model_id"] is None
-    assert cfg["effective_rounds"] == 6
-    assert cfg["effective_gp_profile"] == "quality"
+    assert cfg["runtime_llm_base_url"] == "http://my-ollama:11434"
+    assert cfg["effective_llm_base_url"] == "http://my-ollama:11434"
 
 
-def test_update_config_accepts_ultra_gp_profile(client):  # type: ignore[no-untyped-def]
-    response = client.put("/optimize/config", json={"gp_profile": "ultra"})
+def test_update_config_accepts_known_providers(client):  # type: ignore[no-untyped-def]
+    for provider in ("ollama", "openai", "anthropic"):
+        response = client.put("/optimize/config", json={"llm_provider": provider})
+        assert response.status_code == 200
+        cfg = response.json()
+        assert cfg["runtime_llm_provider"] == provider
+
+
+def test_update_config_unknown_provider_is_accepted(client):  # type: ignore[no-untyped-def]
+    """Unknown provider names are stored as-is; validation is not enforced at this layer."""
+    response = client.put("/optimize/config", json={"llm_provider": "turbo"})
     assert response.status_code == 200
-    cfg = response.json()
-    assert cfg["runtime_gp_profile"] == "ultra"
-    assert cfg["effective_gp_profile"] == "ultra"
-
-
-def test_update_config_invalid_gp_profile_falls_back_to_fast(client):  # type: ignore[no-untyped-def]
-    """Unknown profile names are normalised to 'fast' by the service layer."""
-    response = client.put("/optimize/config", json={"gp_profile": "turbo"})
-    assert response.status_code == 200
-    assert response.json()["effective_gp_profile"] == "fast"
 
 
 def test_update_config_llm_timeout_minimum_is_five(client):  # type: ignore[no-untyped-def]
@@ -109,12 +85,10 @@ def test_get_config_returns_all_required_fields(client):  # type: ignore[no-unty
     assert response.status_code == 200
     body = response.json()
     required_keys = {
-        "effective_gp_profile",
         "effective_llm_provider",
         "effective_llm_model",
         "effective_llm_base_url",
         "effective_llm_timeout_seconds",
-        "effective_rounds",
         "effective_has_llm_api_token",
         "runtime_has_llm_api_token",
         "env_has_llm_api_token",
@@ -175,7 +149,7 @@ def test_get_provider_models_openai_mocked_with_token(client):  # type: ignore[n
     from unittest.mock import patch
 
     with patch(
-        "main.list_available_llm_models",
+        "main.list_available_models",
         return_value=["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
     ) as mock_list:
         response = client.get(

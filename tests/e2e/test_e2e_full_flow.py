@@ -2,40 +2,23 @@ from optimizer_service import OptimizationResult
 
 
 def test_end_to_end_all_endpoints(client, sample_prompt_payload, monkeypatch):  # type: ignore[no-untyped-def]
-    def fake_greaterprompt(fields, config_override=None):  # type: ignore[no-untyped-def]
+    def fake_leo(fields, config_override=None):  # type: ignore[no-untyped-def]
         optimized = {
             "role": fields.get("role"),
-            "task": f"{fields.get('task', '').strip()} (optimized by GP)",
+            "task": f"{fields.get('task', '').strip()} (optimized by Leo)",
             "context": fields.get("context"),
             "constraints": fields.get("constraints"),
             "output_format": fields.get("output_format"),
             "examples": fields.get("examples"),
         }
         return OptimizationResult(
-            engine="greaterprompt-gradient:quality",
+            engine="leo-openai:gpt-4o-mini",
             optimized_fields=optimized,
             optimized_markdown="Task: " + optimized["task"],
-            notes=["e2e-gp"],
+            notes=["e2e-leo"],
         )
 
-    def fake_llm(fields, config_override=None):  # type: ignore[no-untyped-def]
-        optimized = {
-            "role": fields.get("role"),
-            "task": f"{fields.get('task', '').strip()} (optimized by LLM)",
-            "context": fields.get("context"),
-            "constraints": fields.get("constraints"),
-            "output_format": fields.get("output_format"),
-            "examples": fields.get("examples"),
-        }
-        return OptimizationResult(
-            engine="llm-ollama:test",
-            optimized_fields=optimized,
-            optimized_markdown="Task: " + optimized["task"],
-            notes=["e2e-llm"],
-        )
-
-    monkeypatch.setattr("main.optimize_with_greaterprompt", fake_greaterprompt)
-    monkeypatch.setattr("main.optimize_with_llm", fake_llm)
+    monkeypatch.setattr("main.optimize_prompt_with_active_backend", fake_leo)
 
     # Root and docs
     assert client.get("/").status_code == 200
@@ -78,19 +61,14 @@ def test_end_to_end_all_endpoints(client, sample_prompt_payload, monkeypatch):  
     assert put_cfg.json()["effective_gp_profile"] == "quality"
     assert client.get("/optimize/config").status_code == 200
 
-    # Optimize with both engines
-    gp_opt = client.post("/optimize/greaterprompt", json=sample_prompt_payload)
-    assert gp_opt.status_code == 200
-    gp_payload = gp_opt.json()["optimized"]
-    assert "optimized by GP" in gp_payload["task"]
-
-    llm_opt = client.post("/optimize/llm", json=sample_prompt_payload)
-    assert llm_opt.status_code == 200
-    llm_payload = llm_opt.json()["optimized"]
-    assert "optimized by LLM" in llm_payload["task"]
+    # Optimize with Leo engine
+    leo_opt = client.post("/optimize", json=sample_prompt_payload)
+    assert leo_opt.status_code == 200
+    leo_payload = leo_opt.json()["optimized"]
+    assert "optimized by Leo" in leo_payload["task"]
 
     # Save optimized prompt as new version
-    update_response = client.put("/prompts/payments/checkout-system", json=gp_payload)
+    update_response = client.put("/prompts/payments/checkout-system", json=leo_payload)
     assert update_response.status_code == 200
     assert update_response.json()["version"] == 2
 

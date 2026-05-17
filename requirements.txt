@@ -3,6 +3,6 @@ uvicorn
 sqlalchemy
 alembic
 requests
-greaterprompt
+leo-prompt-optimizer
 loguru
 cryptography

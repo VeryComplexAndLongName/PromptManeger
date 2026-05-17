@@ -1,6 +1,4 @@
-import sys
 from concurrent.futures import ThreadPoolExecutor
-from types import ModuleType
 
 import pytest
 from sqlalchemy import insert
@@ -13,10 +11,10 @@ import auth_service
 from database import Base, init_database
 from models import Project, Prompt, Role, Tag
 from optimizer_service import (
+    LeoPromptOptimizerBackend,
     _normalize_text,
-    _parse_ollama_json_response,
-    optimize_with_greaterprompt,
-    _to_prompt_fields,
+    _parse_structured_response,
+    optimize_prompt_with_active_backend,
     get_runtime_optimizer_config,
     set_runtime_optimizer_config,
 )
@@ -36,82 +34,67 @@ def test_normalize_text_handles_non_string_types():  # type: ignore[no-untyped-d
     assert _normalize_text(42) == "42"
 
 
-def test_to_prompt_fields_falls_back_when_values_missing():  # type: ignore[no-untyped-def]
-    raw = {"role": {"nested": "assistant"}, "task": None, "context": ["x", "y"]}
+def test_parse_structured_response_uses_fallbacks():  # type: ignore[no-untyped-def]
+    raw_response = "Task: Improved task\nConstraints: Keep short"
     fallback: dict[str, str | None] = {
-        "role": "fallback-role",
-        "task": "fallback-task",
-        "context": "fallback-context",
-        "constraints": "fallback-constraints",
-        "output_format": "fallback-output",
-        "examples": "fallback-examples",
+        "role": "assistant",
+        "task": "fallback task",
+        "context": "fallback context",
+        "constraints": "fallback constraints",
+        "output_format": "fallback output",
+        "examples": "fallback examples",
     }
 
-    result = _to_prompt_fields(raw, fallback)
-
-    assert result["role"] == '{"nested": "assistant"}'
-    assert result["task"] == "fallback-task"
-    assert result["context"] == '["x", "y"]'
-    assert result["constraints"] == "fallback-constraints"
-
-
-def test_parse_ollama_json_response_recovers_unescaped_newlines():  # type: ignore[no-untyped-def]
-    raw_response = '{\n  "role": "assistant",\n  "task": "Line one\nLine two",\n  "context": "extra"\n}'
-
-    parsed = _parse_ollama_json_response(raw_response)
+    parsed = _parse_structured_response(raw_response, fallback)
 
     assert parsed["role"] == "assistant"
-    assert parsed["task"] == "Line one\nLine two"
-    assert parsed["context"] == "extra"
+    assert parsed["task"] == "Improved task."
+    assert parsed["constraints"] == "Keep short"
+    assert parsed["context"] == "fallback context"
 
 
-def test_parse_ollama_json_response_recovers_truncated_payload():  # type: ignore[no-untyped-def]
-    raw_response = '{"role":"assistant","task":"Short task","context":"Trimmed but usable'
-
-    parsed = _parse_ollama_json_response(raw_response)
-
-    assert parsed["role"] == "assistant"
-    assert parsed["task"] == "Short task"
-    assert parsed["context"] == "Trimmed but usable"
-
-
-def test_runtime_config_applies_quality_profile():  # type: ignore[no-untyped-def]
-    set_runtime_optimizer_config(gp_profile="quality", rounds=3)
+def test_runtime_config_applies_llm_model():  # type: ignore[no-untyped-def]
+    set_runtime_optimizer_config(llm_model="llama3:8b", llm_provider="ollama")
 
     cfg = get_runtime_optimizer_config()
 
-    assert cfg["effective_gp_profile"] == "quality"
-    assert cfg["effective_rounds"] == 3
-    assert cfg["effective_gp_optimize_config"]["candidates_topk"] == 8
-    assert cfg["effective_gp_optimize_config"]["filter"] is True
+    assert cfg["effective_llm_model"] == "llama3:8b"
+    assert cfg["effective_llm_provider"] == "ollama"
 
 
-def test_greaterprompt_lightweight_notes_report_active_runtime(monkeypatch):  # type: ignore[no-untyped-def]
-    fake_greaterprompt = ModuleType("greaterprompt")
+def test_optimize_backend_fallback_when_provider_missing_token():  # type: ignore[no-untyped-def]
+    set_runtime_optimizer_config(llm_provider="anthropic", llm_model="claude-3-haiku", llm_api_token="")
 
-    class FakeGreaterDataloader:  # type: ignore[too-few-public-methods]
-        def __init__(self, custom_inputs):
-            self.custom_inputs = custom_inputs
+    result = optimize_prompt_with_active_backend({"task": "Refine this prompt"})
 
-    fake_greaterprompt.GreaterDataloader = FakeGreaterDataloader
+    assert "fallback" in result.engine
+    assert result.optimized_fields["task"]
 
-    fake_utils = ModuleType("greaterprompt.utils")
 
-    def fake_clean_string(items):
-        return items
+def test_openai_provider_with_ollama_base_url_is_treated_as_compat_mode():  # type: ignore[no-untyped-def]
+    backend = LeoPromptOptimizerBackend()
 
-    fake_utils.clean_string = fake_clean_string
+    assert backend._looks_like_ollama_base_url("http://127.0.0.1:11434") is True
+    assert backend._looks_like_ollama_base_url("http://localhost:11434") is True
+    assert backend._looks_like_ollama_base_url("https://api.openai.com/v1") is False
 
-    monkeypatch.setitem(sys.modules, "greaterprompt", fake_greaterprompt)
-    monkeypatch.setitem(sys.modules, "greaterprompt.utils", fake_utils)
 
-    set_runtime_optimizer_config(model_id=None, gp_profile="ultra", rounds=2)
+def test_openai_provider_with_ollama_base_url_returns_ollama_models(client):  # type: ignore[no-untyped-def]
+    response = client.get(
+        "/optimize/providers/openai/models",
+        params={"base_url": "http://127.0.0.1:19998", "timeout_seconds": 1},
+    )
+    assert response.status_code == 200
+    assert response.json() == []
 
-    result = optimize_with_greaterprompt({"task": "Refine this prompt"})
 
-    assert result.engine == "greaterprompt-light"
-    assert result.notes[0] == "GreaterPrompt model: none (lightweight mode)"
-    assert result.notes[1] == "GreaterPrompt profile: ultra | Rounds: 2"
+def test_pick_low_memory_ollama_model_prefers_smallest_available():  # type: ignore[no-untyped-def]
+    backend = LeoPromptOptimizerBackend()
+    models = ["deepseek-r1:latest", "qwen2.5:0.5b", "qwen2.5:1.5b"]
+
+    selected = backend._pick_low_memory_ollama_model(models, "deepseek-r1:latest")
+
+    assert selected == "qwen2.5:0.5b"
 
 
 @pytest.mark.parametrize(
@@ -172,7 +155,7 @@ def test_init_database_and_bootstrap_seed_default_roles(db_session):  # type: ig
 
     roles = db_session.query(Role).order_by(Role.name.asc()).all()
 
-    assert [role.name for role in roles] == ["admin", "developer"]
+    assert [role.name for role in roles] == ["admin", "developer", "viewer"]
 
 
 def test_concurrent_create_prompt_with_shared_new_tag_is_race_safe(tmp_path):  # type: ignore[no-untyped-def]

@@ -224,9 +224,6 @@ def serialize_optimizer_config(config: Config | None) -> dict[str, Any]:
     if all(
         value is None
         for value in (
-            config.model_id,
-            config.rounds,
-            config.gp_profile,
             config.llm_provider,
             config.llm_model,
             config.llm_base_url,
@@ -237,26 +234,12 @@ def serialize_optimizer_config(config: Config | None) -> dict[str, Any]:
         return get_runtime_optimizer_config()
 
     overrides = {
-        "model_id": None,
-        "rounds": None,
-        "gp_profile": None,
-        "llm_provider": None,
-        "llm_model": None,
-        "llm_base_url": None,
-        "llm_timeout_seconds": None,
-        "llm_api_token": None,
-    }
-    if config is not None:
-        overrides = {
-        "model_id": config.model_id,
-        "rounds": config.rounds,
-        "gp_profile": config.gp_profile,
         "llm_provider": config.llm_provider,
         "llm_model": config.llm_model,
         "llm_base_url": config.llm_base_url,
         "llm_timeout_seconds": config.llm_timeout_seconds,
         "llm_api_token": decrypt_secret(config.llm_api_token_encrypted),
-        }
+    }
     result = build_optimizer_config(overrides)
     result["runtime_has_llm_api_token"] = bool(config and config.llm_api_token_encrypted)
     return result
@@ -268,14 +251,6 @@ def get_or_create_personal_config(db: Session, user: User) -> Config:
 
 def update_personal_config(db: Session, user: User, payload: dict[str, Any]) -> dict[str, Any]:
     config = get_or_create_personal_config(db, user)
-    if payload.get("clear_model_id"):
-        config.model_id = None
-    elif "model_id" in payload:
-        config.model_id = (payload.get("model_id") or "").strip() or None
-    if "rounds" in payload and payload.get("rounds") is not None:
-        config.rounds = max(1, int(payload["rounds"]))
-    if "gp_profile" in payload and payload.get("gp_profile") is not None:
-        config.gp_profile = str(payload["gp_profile"]).strip().lower() or "fast"
     if "llm_provider" in payload and payload.get("llm_provider") is not None:
         config.llm_provider = str(payload["llm_provider"]).strip().lower() or "ollama"
     if "llm_model" in payload and payload.get("llm_model") is not None:

@@ -112,9 +112,6 @@ class Config(Base):
 
     id: Mapped[int] = Column(Integer, primary_key=True, index=True)  # type: ignore[assignment]
     user_id: Mapped[int] = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)  # type: ignore[assignment]
-    model_id: Mapped[str | None] = Column(String, nullable=True)  # type: ignore[assignment]
-    rounds: Mapped[int | None] = Column(Integer, nullable=True)  # type: ignore[assignment]
-    gp_profile: Mapped[str | None] = Column(String, nullable=True)  # type: ignore[assignment]
     llm_provider: Mapped[str | None] = Column(String, nullable=True)  # type: ignore[assignment]
     llm_model: Mapped[str | None] = Column(String, nullable=True)  # type: ignore[assignment]
     llm_base_url: Mapped[str | None] = Column(String, nullable=True)  # type: ignore[assignment]

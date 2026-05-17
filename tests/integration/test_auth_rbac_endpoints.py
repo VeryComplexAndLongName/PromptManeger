@@ -183,8 +183,7 @@ def test_viewer_is_read_only_across_mutating_endpoints(client, sample_prompt_pay
     assert viewer_client.put("/prompts/payments/checkout-system/tags", json={"tags": ["blocked"]}).status_code in {403, 404}
     assert viewer_client.delete("/prompts/payments/checkout-system").status_code in {403, 404}
     assert viewer_client.put("/optimize/config", json={"gp_profile": "quality"}).status_code == 403
-    assert viewer_client.post("/optimize/greaterprompt", json={"task": "Do something"}).status_code == 403
-    assert viewer_client.post("/optimize/llm", json={"task": "Do something"}).status_code == 403
+    assert viewer_client.post("/optimize", json={"task": "Do something"}).status_code == 403
     assert viewer_client.post("/projects", json={"name": "blocked"}).status_code == 403
 
 

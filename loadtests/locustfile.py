@@ -81,7 +81,7 @@ class OptimizeUser(HttpUser):
     weight = int(os.getenv("LOADTEST_OPTIMIZE_WEIGHT", "1"))
 
     @task(1)
-    def optimize_llm(self) -> None:
+    def optimize_leo(self) -> None:
         payload = {
             "role": "assistant",
             "task": "Rewrite the prompt to improve clarity and structure.",
@@ -90,4 +90,4 @@ class OptimizeUser(HttpUser):
             "output_format": "markdown",
             "examples": "none",
         }
-        self.client.post("/optimize/llm", json=payload, name="POST /optimize/llm", timeout=120)
+        self.client.post("/optimize", json=payload, name="POST /optimize", timeout=120)

@@ -18,17 +18,11 @@ const emptyPromptData = () => ({
   examples: "",
 });
 const defaultOptimizeConfig = () => ({
-  model_id: "",
-  rounds: 2,
-  gp_profile: "fast",
   llm_provider: "ollama",
   llm_model: "qwen2.5:0.5b",
   llm_base_url: "http://127.0.0.1:11434",
   llm_timeout_seconds: 300,
   llm_api_token: "",
-  effective_model_id: "",
-  effective_rounds: 2,
-  effective_gp_profile: "fast",
   effective_llm_provider: "ollama",
   effective_llm_model: "qwen2.5:0.5b",
   effective_llm_base_url: "http://127.0.0.1:11434",
@@ -64,76 +58,6 @@ const llmProviderConfigs = {
   },
 };
 const llmProviderOptions = Object.keys(llmProviderConfigs);
-const gpProfileOptions = ["fast", "quality", "ultra"];
-const gpRecommendedModels = [
-  {
-    group: "Gemma",
-    value: "google/gemma-2-9b-it",
-    label: "Gemma-2-9B-IT",
-    supported: "✔",
-    quality: "High",
-    speed: "Fast",
-    vram: "~16-24 GB",
-    bestUse: "Primary GreaterPrompt model",
-    recommended: true,
-  },
-  {
-    group: "Gemma",
-    value: "google/gemma-2-27b-it",
-    label: "Gemma-2-27B-IT",
-    supported: "✔",
-    quality: "Very high",
-    speed: "Medium",
-    vram: "48+ GB",
-    bestUse: "Complex tasks",
-    recommended: false,
-  },
-  {
-    group: "LLaMA",
-    value: "meta-llama/Meta-Llama-3-8B-Instruct",
-    label: "LLaMA-3-8B-Instruct",
-    supported: "✔",
-    quality: "Medium-high",
-    speed: "Fast",
-    vram: "16 GB",
-    bestUse: "Local optimization",
-    recommended: false,
-  },
-  {
-    group: "LLaMA",
-    value: "meta-llama/Meta-Llama-3-70B-Instruct",
-    label: "LLaMA-3-70B-Instruct",
-    supported: "✔",
-    quality: "Very high",
-    speed: "Slow",
-    vram: "80+ GB",
-    bestUse: "Maximum quality",
-    recommended: false,
-  },
-  {
-    group: "Compatible",
-    value: "mistralai/Mistral-7B-Instruct-v0.3",
-    label: "Mistral-7B-Instruct",
-    supported: "✖",
-    quality: "Medium-high",
-    speed: "Very fast",
-    vram: "8-16 GB",
-    bestUse: "Economical option",
-    recommended: false,
-  },
-  {
-    group: "Compatible",
-    value: "Qwen/Qwen2-7B-Instruct",
-    label: "Qwen2-7B-Instruct",
-    supported: "✖",
-    quality: "High",
-    speed: "Fast",
-    vram: "8-16 GB",
-    bestUse: "Reasoning tasks",
-    recommended: false,
-  },
-];
-const gpRecommendedModelGroups = ["Gemma", "LLaMA", "Compatible"];
 const defaultLlmModelsByProvider = Object.fromEntries(
   Object.entries(llmProviderConfigs).map(([key, config]) => [key, config.models])
 );
@@ -152,6 +76,9 @@ const buildPromptMarkdown = (fields) => {
 
 createApp({
   setup() {
+    /* app meta */
+    const appVersion = ref("");
+
     /* auth */
     const authReady = ref(false);
     const authToken = ref(window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || "");
@@ -205,7 +132,7 @@ createApp({
     const optimizerLoading = ref(false);
     const optimizerError = ref("");
     const optimizerStatus = ref("");
-    const optimizerMode = ref("greaterprompt");
+    const optimizerMode = ref("optimizer");
     const optimizerLogs = ref([]);
     const optimizerEngine = ref("");
     const optimizerNotes = ref([]);
@@ -213,7 +140,7 @@ createApp({
     const optimizedDraft = ref(emptyPromptData());
     const optimizeInputSource = ref("create");
     const optimizeTargetPrompt = ref(null);
-    const optimizeEndpoint = ref("/optimize/greaterprompt");
+    const optimizeEndpoint = ref("/optimize");
     const optimizeConfig = ref(defaultOptimizeConfig());
     const optimizeConfigStatus = ref("");
     const availableLlmModels = ref([...defaultLlmModelsByProvider.ollama]);
@@ -235,16 +162,6 @@ createApp({
     const editingUserId = ref(null);
     const editUserForm = ref(emptyUserForm());
 
-    const gpModelsByGroup = Object.fromEntries(
-      gpRecommendedModelGroups.map((group) => [
-        group,
-        gpRecommendedModels.filter((model) => model.group === group),
-      ])
-    );
-
-    const selectedGpModelMeta = computed(() => {
-      return gpRecommendedModels.find((model) => model.value === optimizeConfig.value.model_id) || null;
-    });
     const isAuthenticated = computed(() => !!currentUser.value);
     const isAdmin = computed(() => currentUser.value?.role === "admin");
     const isViewer = computed(() => currentUser.value?.role === "viewer");
@@ -1056,9 +973,6 @@ createApp({
       }
       optimizeConfigStatus.value = "";
       const payload = {
-        model_id: optimizeConfig.value.model_id || null,
-        rounds: Number(optimizeConfig.value.rounds) || 2,
-        gp_profile: optimizeConfig.value.gp_profile || "fast",
         llm_provider: optimizeConfig.value.llm_provider || "ollama",
         llm_model: optimizeConfig.value.llm_model || "qwen2.5:0.5b",
         llm_base_url: optimizeConfig.value.llm_base_url || "http://127.0.0.1:11434",
@@ -1100,12 +1014,10 @@ createApp({
       optimizeEndpoint.value = endpoint;
       optimizeInputSource.value = source;
       optimizeTargetPrompt.value = target;
-      optimizerMode.value = endpoint.includes("/llm") ? "llm" : "greaterprompt";
+      optimizerMode.value = "optimizer";
       optimizerModalOpen.value = true;
 
-      pushOptimizerLog(
-        `Started ${optimizerMode.value === "llm" ? "LLM" : "GreaterPrompt"} optimization from ${source}.`
-      );
+      pushOptimizerLog(`Started optimization from ${source}.`);
       pushOptimizerLog("Saving active optimization config before request ...");
 
       const saved = await persistOptimizeConfig(false);
@@ -1118,16 +1030,9 @@ createApp({
       }
 
       pushOptimizerLog("Optimization config saved and applied.", "success");
-      if (optimizerMode.value === "llm") {
-        pushOptimizerLog(
-          `Using provider=${optimizeConfig.value.effective_llm_provider || optimizeConfig.value.llm_provider}, model=${optimizeConfig.value.effective_llm_model || optimizeConfig.value.llm_model}, timeout=${optimizeConfig.value.effective_llm_timeout_seconds || optimizeConfig.value.llm_timeout_seconds}s.`
-        );
-      } else {
-        const activeGpModel = optimizeConfig.value.effective_model_id || optimizeConfig.value.model_id || "lightweight mode";
-        pushOptimizerLog(
-          `Using GP profile=${optimizeConfig.value.effective_gp_profile || optimizeConfig.value.gp_profile}, rounds=${optimizeConfig.value.effective_rounds || optimizeConfig.value.rounds}, model=${activeGpModel}.`
-        );
-      }
+      pushOptimizerLog(
+        `Using provider=${optimizeConfig.value.effective_llm_provider || optimizeConfig.value.llm_provider}, model=${optimizeConfig.value.effective_llm_model || optimizeConfig.value.llm_model}, timeout=${optimizeConfig.value.effective_llm_timeout_seconds || optimizeConfig.value.llm_timeout_seconds}s.`
+      );
       pushOptimizerLog(`Sending request to ${endpoint} ...`);
 
       let res;
@@ -1176,7 +1081,7 @@ createApp({
       }
 
       optimizerLoading.value = false;
-      optimizerEngine.value = data.engine || "greaterprompt";
+      optimizerEngine.value = data.engine || "optimizer";
       optimizerNotes.value = data.notes || [];
       optimizerStatus.value = optimizerEngine.value.includes("fallback")
         ? "Optimization finished with fallback"
@@ -1224,35 +1129,13 @@ createApp({
 
     const optimizeFromCreate = async () => {
       createOptimizeMenuOpen.value = false;
-      await optimizePrompt("/optimize/greaterprompt", form.value, "create", null);
-    };
-
-    const optimizeFromCreateLLM = async () => {
-      createOptimizeMenuOpen.value = false;
-      await optimizePrompt("/optimize/llm", form.value, "create", null);
+      await optimizePrompt("/optimize", form.value, "create", null);
     };
 
     const optimizeFromBrowse = async (p) => {
       browseOptimizeMenuKey.value = null;
       await optimizePrompt(
-        "/optimize/greaterprompt",
-        {
-          role: p.role || "",
-          task: p.task || "",
-          context: p.context || "",
-          constraints: p.constraints || "",
-          output_format: p.output_format || "",
-          examples: p.examples || "",
-        },
-        "browse",
-        { project: p.project, name: p.name }
-      );
-    };
-
-    const optimizeFromBrowseLLM = async (p) => {
-      browseOptimizeMenuKey.value = null;
-      await optimizePrompt(
-        "/optimize/llm",
+        "/optimize",
         {
           role: p.role || "",
           task: p.task || "",
@@ -1312,6 +1195,7 @@ createApp({
       countdownTimerId = window.setInterval(() => {
         clockNow.value = Date.now();
       }, 1000);
+      fetch("/version").then(r => r.ok ? r.json() : null).then(d => { if (d && d.version) appVersion.value = d.version; }).catch(() => {});
       await fetchAuthStatus();
       if (await loadCurrentUser()) {
         await initializeAuthenticatedApp();
@@ -1328,6 +1212,7 @@ createApp({
     });
 
     return {
+      appVersion,
       authReady, authToken, currentUser, authMode, authForm, authError, authStatus, authBusy, authBootstrapRequired, isAuthenticated, isAdmin, isViewer, canViewAdmin, canWrite, currentUserProjectsLabel,
       activeTab, form, createStatus,
       items, filterProject, filterTag, fetchPrompts, browsePage, browsePageSize, browseTotalItems, totalBrowsePages, paginatedItems, setBrowsePage, browseSummaryLabel,
@@ -1337,14 +1222,13 @@ createApp({
       createOptimizeMenuOpen, browseOptimizeMenuKey,
       optimizerModalOpen, optimizerLoading, optimizerError, optimizerStatus, optimizerMode, optimizerLogs, optimizerEngine, optimizerNotes,
       optimizedMarkdown, optimizedDraft,
-      optimizeConfig, optimizeConfigStatus, llmProviderOptions, availableLlmModels, llmModelsLoading, llmModelsLoadError, gpProfileOptions,
+      optimizeConfig, optimizeConfigStatus, llmProviderOptions, availableLlmModels, llmModelsLoading, llmModelsLoadError,
       roleOptions, projects, projectsLoading, projectsStatus, newProjectForm, editingProjectId, editProjectForm,
       users, usersLoading, usersStatus, newUserForm, editingUserId, editUserForm, availableProjectNames,
-      gpRecommendedModels, gpRecommendedModelGroups, gpModelsByGroup, selectedGpModelMeta,
       key, togglePrompt, saveNewVersion, saveTags, createPrompt,
       deletePrompt,
-      optimizeFromCreate, optimizeFromCreateLLM,
-      optimizeFromBrowse, optimizeFromBrowseLLM,
+      optimizeFromCreate,
+      optimizeFromBrowse,
       applyOptimizedPrompt, reoptimizePrompt, saveOptimizeConfig, loadAvailableLlmModels, updateProviderBaseUrl, getProviderLabel, modelRequiresToken,
       submitAuth, logout, createProjectRecord, beginEditProject, cancelProjectEdit, saveProjectEdit, deleteProjectRecord,
       createUserAccount, beginEditUser, cancelUserEdit, saveUserEdit, deleteUserAccount, loadUsers, loadProjects,
@@ -1360,6 +1244,7 @@ createApp({
     <div v-if="!authReady" class="auth-shell">
       <div class="auth-card">
         <h1>Prompt Man</h1>
+        <span v-if="appVersion" style="display:block;font-size:0.78rem;color:#9ca3af;margin:-6px 0 6px">v{{ appVersion }}</span>
         <p class="subtitle">Loading session...</p>
       </div>
     </div>
@@ -1367,6 +1252,7 @@ createApp({
     <div v-else-if="!isAuthenticated" class="auth-shell">
       <div class="auth-card">
         <h1>Prompt Man</h1>
+        <span v-if="appVersion" style="display:block;font-size:0.78rem;color:#9ca3af;margin:-6px 0 6px">v{{ appVersion }}</span>
         <p class="subtitle">{{ authBootstrapRequired ? 'Create the first admin account for this workspace.' : 'Sign in to access prompts and personal optimization config.' }}</p>
         <p class="auth-helper">Access token lifetime is 30 minutes. The UI refreshes the session automatically while the refresh token is still valid.</p>
         <div class="field">
@@ -1390,7 +1276,7 @@ createApp({
     <header style="margin-bottom:4px">
       <div class="header-topline">
         <div>
-          <h1>Prompt Man</h1>
+          <h1>Prompt Man <span v-if="appVersion" style="font-size:0.55em;color:#9ca3af;font-weight:400;vertical-align:middle">v{{ appVersion }}</span></h1>
           <p class="subtitle">Versioned prompts with tags, markdown, and per-user optimization config.</p>
         </div>
         <div class="auth-banner">
@@ -1497,16 +1383,7 @@ createApp({
               <h4>Latest content &mdash; v{{ p.latest_version }}</h4>
               <div class="md-content" v-html="md(buildPromptMarkdown(p))"></div>
               <div class="btn-row" style="margin-top:12px" v-if="canWrite">
-                <div class="split-wrap">
-                  <button class="split-btn secondary" @click.stop="optimizeFromBrowse(p)">
-                    <span class="split-main-label">Optimize Prompt</span>
-                    <span class="split-arrow" @click.stop="browseOptimizeMenuKey = (browseOptimizeMenuKey===key(p) ? null : key(p))">&#9662;</span>
-                  </button>
-                  <div class="split-menu" v-if="browseOptimizeMenuKey===key(p)">
-                    <button class="split-menu-item" @click.stop="optimizeFromBrowse(p)">Optimize with GreaterPrompt</button>
-                    <button class="split-menu-item" @click.stop="optimizeFromBrowseLLM(p)">Optimize Prompt with LLM</button>
-                  </div>
-                </div>
+                <button class="secondary" @click.stop="optimizeFromBrowse(p)">Optimize Prompt</button>
                 <button class="danger" @click.stop="deletePrompt(p)">Delete Prompt</button>
               </div>
               <p v-if="isViewer" style="margin-top:12px;color:var(--muted)">Viewer role can inspect prompts but cannot optimize, edit, or delete them.</p>
@@ -1640,16 +1517,7 @@ createApp({
         <div class="md-editor-preview" :class="{empty: !form.task}" v-html="form.task ? md(buildPromptMarkdown(form)) : 'Nothing to preview yet\u2026'"></div>
       </div>
       <div class="btn-row">
-        <div class="split-wrap">
-          <button class="split-btn secondary" @click.stop="optimizeFromCreate">
-            <span class="split-main-label">Optimize Prompt</span>
-            <span class="split-arrow" @click.stop="createOptimizeMenuOpen = !createOptimizeMenuOpen">&#9662;</span>
-          </button>
-          <div class="split-menu" v-if="createOptimizeMenuOpen">
-            <button class="split-menu-item" @click.stop="optimizeFromCreate">Optimize with GreaterPrompt</button>
-            <button class="split-menu-item" @click.stop="optimizeFromCreateLLM">Optimize Prompt with LLM</button>
-          </div>
-        </div>
+        <button class="secondary" @click.stop="optimizeFromCreate">Optimize Prompt</button>
         <button @click="createPrompt">Save Prompt</button>
       </div>
       <p v-if="createStatus" :class="createStatus.includes('failed') ? 'status-err' : 'status-ok'">{{ createStatus }}</p>
@@ -1658,12 +1526,13 @@ createApp({
     <!-- CONFIG TAB -->
     <div class="tab-panel" v-if="activeTab==='config'">
       <h2 style="margin-top:0">Optimization Config</h2>
-      <p style="margin:0 0 12px;color:var(--muted)">Manage active settings for LLM and GreaterPrompt optimization. These settings are stored per user.</p>
+      <p style="margin:0 0 12px;color:var(--muted)">Manage active settings for the configured optimizer backend. These settings are stored per user.</p>
+      <p style="margin:0 0 12px;color:var(--muted)">Leo uses a 10-step prompt-engineering system prompt submitted to an LLM — a provider must be configured. Without a provider the service falls back to the built-in heuristic engine.</p>
       <p v-if="isViewer" style="margin:0 0 12px;color:var(--muted)">Viewer role is read-only. Configuration values are visible but cannot be changed.</p>
 
       <div class="opt-config-box opt-config-box-standalone">
         <div class="opt-settings-group">
-          <h5>LLM Settings</h5>
+          <h5>LLM Provider Settings (required for Leo optimization)</h5>
           <div class="opt-settings-toolbar">
             <button
               class="ghost opt-refresh-btn"
@@ -1676,13 +1545,13 @@ createApp({
           </div>
           <div class="create-grid">
             <div class="field">
-              <label>LLM Provider</label>
+              <label>Provider</label>
               <select class="select-pretty" v-model="optimizeConfig.llm_provider" :disabled="!canWrite" @change="updateProviderBaseUrl(optimizeConfig.llm_provider); loadAvailableLlmModels(optimizeConfig.llm_provider, false)">
                 <option v-for="provider in llmProviderOptions" :key="provider" :value="provider">{{ getProviderLabel(provider) }}</option>
               </select>
             </div>
             <div class="field">
-              <label>LLM Model</label>
+              <label>Model</label>
               <select class="select-pretty" v-model="optimizeConfig.llm_model" :disabled="llmModelsLoading || !canWrite">
                 <option v-for="m in availableLlmModels" :key="m" :value="m">{{ m }}</option>
               </select>
@@ -1699,13 +1568,13 @@ createApp({
               <p v-if="optimizeConfig.effective_has_llm_api_token" style="margin:4px 0 0;color:var(--muted);font-size:0.82rem">✓ Token is configured</p>
             </div>
             <div class="field" v-else style="max-width:220px">
-              <label>LLM Timeout (seconds)</label>
+              <label>Timeout (seconds)</label>
               <input type="number" min="5" v-model.number="optimizeConfig.llm_timeout_seconds" :disabled="!canWrite" />
             </div>
           </div>
           <div class="create-grid" v-if="modelRequiresToken()">
             <div class="field" style="max-width:220px">
-              <label>LLM Timeout (seconds)</label>
+              <label>Timeout (seconds)</label>
               <input type="number" min="5" v-model.number="optimizeConfig.llm_timeout_seconds" :disabled="!canWrite" />
             </div>
           </div>
@@ -1713,116 +1582,12 @@ createApp({
           <p v-if="llmModelsLoadError" style="margin:4px 0 0;color:var(--muted);font-size:0.84rem">{{ llmModelsLoadError }}</p>
         </div>
 
-        <div class="opt-settings-group opt-settings-group-gp">
-          <h5>GreaterPrompt Settings</h5>
-          <div class="create-grid">
-            <div class="field">
-              <label>GreaterPrompt Profile</label>
-              <select class="select-pretty" v-model="optimizeConfig.gp_profile" :disabled="!canWrite">
-                <option v-for="p in gpProfileOptions" :key="p" :value="p">{{ p }}</option>
-              </select>
-            </div>
-            <div class="field">
-              <label>GreaterPrompt Model (optional)</label>
-              <select class="select-pretty" v-model="optimizeConfig.model_id" :disabled="!canWrite">
-                <option value="">No model selected (lightweight mode)</option>
-                <optgroup v-for="group in gpRecommendedModelGroups" :key="group" :label="group">
-                  <option
-                    v-for="model in gpModelsByGroup[group]"
-                    :key="model.value"
-                    :value="model.value"
-                  >
-                    {{ model.label }}{{ model.recommended ? ' - recommended' : '' }}
-                  </option>
-                </optgroup>
-              </select>
-              <p class="gp-model-hint" v-if="selectedGpModelMeta">
-                {{ selectedGpModelMeta.label }}: {{ selectedGpModelMeta.bestUse }} | VRAM {{ selectedGpModelMeta.vram }}
-              </p>
-              <p class="gp-model-hint" v-else>
-                Empty value keeps GreaterPrompt in lightweight mode without loading a local gradient model.
-              </p>
-            </div>
-          </div>
-          <div class="field" style="max-width:180px">
-            <label>Gradient Rounds</label>
-            <input type="number" min="1" v-model.number="optimizeConfig.rounds" :disabled="!canWrite" />
-          </div>
-          <div class="gp-model-table-wrap">
-            <div class="gp-model-table-title">Recommended Models</div>
-            <div class="gp-model-cards gp-model-cards-empty">
-              <button
-                type="button"
-                class="gp-model-card gp-model-card-empty"
-                :class="{ active: !optimizeConfig.model_id }"
-                :disabled="!canWrite"
-                @click="optimizeConfig.model_id = ''"
-              >
-                <div class="gp-model-card-top">
-                  <div class="gp-model-card-title">No model</div>
-                  <span class="gp-model-support gp-model-support-light">Lightweight</span>
-                </div>
-                <div class="gp-model-card-meta">Runs without loading a gradient model</div>
-                <div class="gp-model-card-grid">
-                  <div><span>Quality</span><strong>Lightweight</strong></div>
-                  <div><span>Speed</span><strong>Fastest</strong></div>
-                  <div><span>VRAM</span><strong>Minimal</strong></div>
-                  <div><span>Use</span><strong>Heuristic mode</strong></div>
-                </div>
-              </button>
-            </div>
-
-            <div
-              class="gp-model-group"
-              v-for="group in gpRecommendedModelGroups"
-              :key="group"
-            >
-              <div class="gp-model-group-title">{{ group }}</div>
-              <div class="gp-model-cards">
-                <button
-                  type="button"
-                  class="gp-model-card"
-                  :class="{
-                    active: optimizeConfig.model_id === model.value,
-                    'gp-model-card-supported': model.supported === '✔',
-                    'gp-model-card-compatible': model.supported !== '✔'
-                  }"
-                  :disabled="!canWrite"
-                  v-for="model in gpModelsByGroup[group]"
-                  :key="model.value"
-                  @click="optimizeConfig.model_id = model.value"
-                >
-                  <div class="gp-model-card-top">
-                    <div>
-                      <div class="gp-model-card-title">{{ model.label }}</div>
-                      <div class="gp-model-card-group">{{ model.group }}</div>
-                    </div>
-                    <div class="gp-model-card-badges">
-                      <span class="gp-model-support" :class="model.supported === '✔' ? 'gp-model-support-official' : 'gp-model-support-compatible'">
-                        {{ model.supported === '✔' ? 'Official' : 'Compatible' }}
-                      </span>
-                      <span class="gp-model-badge" v-if="model.recommended">Recommended</span>
-                    </div>
-                  </div>
-                  <div class="gp-model-card-meta">{{ model.supported === '✔' ? 'Official GreaterPrompt support' : 'Works as a compatible alternative' }}</div>
-                  <div class="gp-model-card-grid">
-                    <div><span>Quality</span><strong>{{ model.quality }}</strong></div>
-                    <div><span>Speed</span><strong>{{ model.speed }}</strong></div>
-                    <div><span>VRAM</span><strong>{{ model.vram }}</strong></div>
-                    <div><span>Best use</span><strong>{{ model.bestUse }}</strong></div>
-                  </div>
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-
         <div class="btn-row" style="margin-top:12px" v-if="canWrite">
           <button class="secondary" @click="saveOptimizeConfig">Save Config</button>
         </div>
         <p v-if="optimizeConfigStatus" :class="optimizeConfigStatus.includes('Failed') ? 'status-err' : 'status-ok'">{{ optimizeConfigStatus }}</p>
         <p style="margin:6px 0 0;color:var(--muted);font-size:0.84rem">
-          Active GP profile: {{ optimizeConfig.effective_gp_profile }} | Active LLM model: {{ optimizeConfig.effective_llm_model }} | Active provider: {{ optimizeConfig.effective_llm_provider }} | Timeout: {{ optimizeConfig.effective_llm_timeout_seconds }}s
+          Active model: {{ optimizeConfig.effective_llm_model }} | Active provider: {{ optimizeConfig.effective_llm_provider }} | Timeout: {{ optimizeConfig.effective_llm_timeout_seconds }}s
         </p>
       </div>
 
@@ -2026,10 +1791,10 @@ createApp({
         </div>
 
         <div v-if="!optimizerLoading">
-          <p style="margin:0 0 8px;color:var(--muted)">Mode: {{ optimizerMode === 'llm' ? 'LLM' : 'GreaterPrompt' }}</p>
+          <p style="margin:0 0 8px;color:var(--muted)">Mode: Backend</p>
           <p style="margin:0 0 8px;color:var(--muted)">Engine: {{ optimizerEngine }}</p>
           <p style="margin:0 0 10px;color:var(--muted);font-size:0.9rem">
-            Active GP profile: {{ optimizeConfig.effective_gp_profile }} | Active LLM model: {{ optimizeConfig.effective_llm_model }} | Active provider: {{ optimizeConfig.effective_llm_provider }} | Timeout: {{ optimizeConfig.effective_llm_timeout_seconds }}s
+            Active profile: {{ optimizeConfig.effective_gp_profile }} | Active model: {{ optimizeConfig.effective_llm_model }} | Active provider: {{ optimizeConfig.effective_llm_provider }} | Timeout: {{ optimizeConfig.effective_llm_timeout_seconds }}s
           </p>
 
           <div class="chips" v-if="optimizerNotes.length">

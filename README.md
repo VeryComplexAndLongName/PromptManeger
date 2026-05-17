@@ -18,10 +18,8 @@ Prompt Man: FastAPI + Vue app for storing, versioning, and optimizing prompts.
 - Tagging plus AND/OR search.
 - Server-side prompt pagination with `X-Total-Count`.
 - Prompt delete with cascading cleanup of versions and access data.
-- Two optimization paths:
-  - `Optimize Prompt` -> GreaterPrompt
-  - `Optimize Prompt with LLM` -> provider-backed LLM flow
-- GreaterPrompt profiles: `fast`, `quality`, `ultra`.
+- Unified optimization path through pluggable optimizer backend.
+- Optimization profiles: `fast`, `quality`, `ultra`.
 - Multi-provider LLM support: Ollama, OpenAI, Anthropic.
 - Dynamic provider model discovery.
 - Per-user optimization config persisted in the database.
@@ -189,9 +187,9 @@ Deleting a project cascades to related prompt and access rows.
 
 - Manage personal optimization settings.
 - Configure LLM provider, model, base URL, timeout, and token.
-- Configure GreaterPrompt profile, model, and rounds.
+- Configure optimizer profile, model hint, and rounds.
 - Save settings per user.
-- Reuse the saved config in both optimize endpoints and model discovery.
+- Reuse the saved config in optimization and model discovery.
 - Viewer can inspect config values but cannot save changes.
 - The session banner shows UTC expiry time, a live expiry countdown, and the next scheduled refresh time.
 
@@ -227,25 +225,31 @@ Each user has a separate optimization config row in `configs`.
 
 - `GET /optimize/config` returns the current user's config.
 - `PUT /optimize/config` updates the current user's config.
-- `POST /optimize/greaterprompt` uses the current user's config.
-- `POST /optimize/llm` uses the current user's config.
+- `POST /optimize` uses the current user's config.
 - `GET /optimize/providers/{provider}/models` uses the current user's config as the default override source.
 
 One user's changes do not modify another user's config.
 
 ## Optimization Features
 
-### GreaterPrompt
+### Prompt Optimization
 
 Endpoint:
 
 ```text
-POST /optimize/greaterprompt
+POST /optimize
 ```
 
 - Main UI optimize path.
-- Uses gradient mode when a GreaterPrompt model is configured.
-- Falls back to lightweight mode when gradient optimization is unavailable.
+- Uses active backend configured by `OPTIMIZER_BACKEND`.
+- Falls back to heuristic mode when backend/provider call fails.
+
+**How Leo optimization works:**
+
+The default `leo` backend uses the `leo-prompt-optimizer` library.
+Leo structures a 10-step prompt-engineering methodology (analyze intent → extract components → enhance clarity → add context → define persona → structure instructions → add examples → specify output format → optimize tokens → insert placeholders) and submits it to an **LLM via the configured provider**.
+The LLM executes the structured rewrite based on that system prompt.
+An LLM provider (Ollama, OpenAI, Anthropic, etc.) **must be configured** to use Leo; without it the service falls back to the built-in heuristic engine.
 
 Profiles:
 
@@ -256,17 +260,14 @@ Profiles:
 - `ultra`
   - heaviest preset with more aggressive generation settings
 
-### LLM Optimization
+### Backend Model Providers
 
-Endpoint:
-
-```text
-POST /optimize/llm
-```
-
-- Secondary optimize path in the split-button menu.
-- Supports Ollama, OpenAI, and Anthropic.
-- Uses strict JSON response parsing plus fallback cleanup/repair logic.
+- Supported provider families: OpenAI-compatible, Anthropic, Groq, Gemini, Mistral.
+- Provider/model selection is controlled via per-user config and environment defaults.
+- Ollama can be used in two ways:
+  - `llm_provider: "ollama"` (native local profile)
+  - `llm_provider: "openai"` with `llm_base_url` pointing to Ollama's OpenAI-compatible endpoint
+    (the service auto-normalizes common local URLs like `http://127.0.0.1:11434` to `/v1`).
 
 ### Model Discovery
 
@@ -278,6 +279,7 @@ GET /optimize/providers/{provider}/models
 
 - Ollama: discovered via provider API.
 - OpenAI: discovered via provider API when a token is supplied.
+- OpenAI + local Ollama base URL: discovered through Ollama `/api/tags` compatibility path.
 - Anthropic: fixed built-in list.
 
 ## Optimization Config Example
@@ -313,21 +315,23 @@ GET /optimize/providers/{provider}/models
   - optional first-run admin password override
 - `PROMPTMAN_KEY`
   - optional machine/app key source for encryption
-- `GREATERPROMPT_MODEL_ID`
-  - fallback GreaterPrompt model when no per-user runtime override exists
-- `GREATERPROMPT_ROUNDS`
+- `OPTIMIZER_BACKEND`
+  - active optimizer backend name (default: `leo`)
+- `OPTIMIZER_MODEL_ID`
+  - optional fallback model hint when no per-user override exists
+- `OPTIMIZER_ROUNDS`
   - fallback round count
-- `GREATERPROMPT_PROFILE`
+- `OPTIMIZER_PROFILE`
   - fallback profile: `fast`, `quality`, `ultra`
-- `OPTIMIZE_LLM_PROVIDER`
+- `OPTIMIZER_PROVIDER`
   - fallback provider
-- `OPTIMIZE_LLM_MODEL`
+- `OPTIMIZER_MODEL`
   - fallback model
-- `OLLAMA_BASE_URL`
-  - fallback base URL for local/default provider usage
-- `OPTIMIZE_LLM_TIMEOUT_SECONDS`
+- `OPTIMIZER_BASE_URL`
+  - fallback provider base URL
+- `OPTIMIZER_TIMEOUT_SECONDS`
   - fallback timeout
-- `OPTIMIZE_LLM_API_TOKEN`
+- `OPTIMIZER_API_TOKEN`
   - fallback encrypted token source
 
 Per-user config returned by `/optimize/config` takes precedence over environment defaults for that user's optimize flows.
@@ -399,8 +403,7 @@ Each version response includes:
 
 ### Optimize
 
-- `POST /optimize/greaterprompt`
-- `POST /optimize/llm`
+- `POST /optimize`
 - `GET /optimize/config`
 - `PUT /optimize/config`
 - `GET /optimize/providers/{provider}/models`

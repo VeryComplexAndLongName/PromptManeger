@@ -9,7 +9,7 @@ dependencies = [
     "sqlalchemy>=2.0.0",
     "alembic>=1.13.0",
     "requests>=2.33.1",
-    "greaterprompt>=0.2.0",
+    "leo-prompt-optimizer>=1.0.9",
     "loguru>=0.7.2",
     "cryptography>=48.0.0"
 ]
@@ -94,5 +94,5 @@ module = ["alembic.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["greaterprompt.*", "transformers.*"]
+module = ["leo_prompt_optimizer.*"]
 ignore_missing_imports = true
