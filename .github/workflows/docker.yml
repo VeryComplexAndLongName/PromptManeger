@@ -22,29 +22,31 @@ jobs:
       id: version
       shell: bash
       run: |
-      eval "$(python - <<'PY'
+        eval "$(python - <<'PY'
 import tomllib
 from pathlib import Path
 
 data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-    project = data["project"]
-    name = project["name"]
-    version = project["version"]
-    description = project.get("description", "")
+project = data["project"]
+name = project["name"]
+version = project["version"]
+description = project.get("description", "")
 
-    def esc(value: str) -> str:
-        return value.replace("\\", "\\\\").replace('"', '\\"')
 
-    print(f'NAME="{esc(name)}"')
-    print(f'VERSION="{esc(version)}"')
-    print(f'DESCRIPTION="{esc(description)}"')
+def esc(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+print(f'NAME="{esc(name)}"')
+print(f'VERSION="{esc(version)}"')
+print(f'DESCRIPTION="{esc(description)}"')
 PY
-      )"
-      IMAGE_NAME="$NAME"
+        )"
+        IMAGE_NAME="$NAME"
         echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      echo "name=$NAME" >> "$GITHUB_OUTPUT"
-      echo "image_name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
-      echo "description=$DESCRIPTION" >> "$GITHUB_OUTPUT"
+        echo "name=$NAME" >> "$GITHUB_OUTPUT"
+        echo "image_name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
+        echo "description=$DESCRIPTION" >> "$GITHUB_OUTPUT"
         echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
     - name: Create git tag from pyproject version
