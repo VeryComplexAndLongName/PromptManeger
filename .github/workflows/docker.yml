@@ -12,6 +12,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      IMAGE_SIZE_LIMIT_MB: "500"
 
     steps:
     - uses: actions/checkout@v4
@@ -70,3 +72,41 @@ jobs:
           ${{ steps.version.outputs.dockerhub_namespace }}/${{ steps.version.outputs.image_name }}:latest
           ${{ steps.version.outputs.dockerhub_namespace }}/${{ steps.version.outputs.image_name }}:${{ steps.version.outputs.version }}
           ${{ steps.version.outputs.dockerhub_namespace }}/${{ steps.version.outputs.image_name }}:${{ steps.version.outputs.tag }}
+
+    - name: Report image size from GHCR
+      id: image_size
+      shell: bash
+      run: |
+        set -euo pipefail
+        IMAGE_REF="ghcr.io/${{ steps.version.outputs.ghcr_owner }}/${{ steps.version.outputs.image_name }}:${{ steps.version.outputs.version }}"
+        docker pull "$IMAGE_REF"
+
+        SIZE_BYTES="$(docker image inspect "$IMAGE_REF" --format '{{.Size}}')"
+        SIZE_MB="$(( (SIZE_BYTES + 1024*1024 - 1) / (1024*1024) ))"
+
+        {
+          echo "### Docker image size"
+          echo "- Image: $IMAGE_REF"
+          echo "- Size: ${SIZE_MB} MB (${SIZE_BYTES} bytes)"
+          echo "- Limit: ${IMAGE_SIZE_LIMIT_MB} MB"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        echo "image_ref=$IMAGE_REF" >> "$GITHUB_OUTPUT"
+        echo "size_bytes=$SIZE_BYTES" >> "$GITHUB_OUTPUT"
+        echo "size_mb=$SIZE_MB" >> "$GITHUB_OUTPUT"
+
+    - name: Enforce max image size
+      shell: bash
+      run: |
+        set -euo pipefail
+        SIZE_MB="${{ steps.image_size.outputs.size_mb }}"
+        WARN_MB="$(( IMAGE_SIZE_LIMIT_MB * 90 / 100 ))"
+
+        if [ "$SIZE_MB" -ge "$WARN_MB" ] && [ "$SIZE_MB" -le "$IMAGE_SIZE_LIMIT_MB" ]; then
+          echo "::warning::Image size is at ${SIZE_MB} MB, which is >= 90% of limit (${WARN_MB}/${IMAGE_SIZE_LIMIT_MB} MB)."
+        fi
+
+        if [ "$SIZE_MB" -gt "$IMAGE_SIZE_LIMIT_MB" ]; then
+          echo "::error::Image is too large: ${SIZE_MB} MB (limit: ${IMAGE_SIZE_LIMIT_MB} MB)."
+          exit 1
+        fi
