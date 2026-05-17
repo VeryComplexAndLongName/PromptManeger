@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, StringConstraints
@@ -37,6 +38,8 @@ class PromptTagsUpdate(BaseModel):
 
 class PromptVersionOut(BaseModel):
     version: int
+    created_at: datetime
+    created_by_username: str | None = None
     role: str | None = None
     task: str
     context: str | None = None
@@ -114,6 +117,10 @@ class UserBootstrap(BaseModel):
     password: RequiredPromptText
 
 
+class RefreshTokenRequest(BaseModel):
+    refresh_token: RequiredPromptText
+
+
 class ProjectAccessUpdate(BaseModel):
     projects: list[RequiredPromptText] = []
 
@@ -162,7 +169,12 @@ class UserOut(BaseModel):
 
 class AuthResponse(BaseModel):
     access_token: str
+    refresh_token: str
     token_type: str = "bearer"
+    access_token_ttl_seconds: int
+    refresh_token_ttl_seconds: int
+    access_token_expires_at: int
+    refresh_token_expires_at: int
     user: UserOut
 
 
@@ -174,6 +186,10 @@ class AuthStatus(BaseModel):
 class PromptOut(BaseModel):
     name: str
     project: str
+    created_at: datetime
+    updated_at: datetime
+    created_by_username: str | None = None
+    updated_by_username: str | None = None
     tags: list[str]
     latest_version: int
     role: str | None = None

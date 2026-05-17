@@ -47,6 +47,13 @@ body {
   align-items: center;
 }
 
+.auth-helper {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
 .header-topline {
   display: flex;
   justify-content: space-between;
@@ -459,7 +466,33 @@ button:hover { transform: translateY(-1px); filter: saturate(1.15); }
   padding: 12px 14px; cursor: pointer; user-select: none;
 }
 .prompt-header:hover { background: rgba(0,0,0,0.02); }
-.prompt-header h3 { margin: 0; font-size: 1rem; flex: 1; }
+.prompt-header-main {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.prompt-header h3 {
+  margin: 0;
+  font-size: 1rem;
+  white-space: nowrap;
+}
+.prompt-header-meta {
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+.prompt-header-chips {
+  margin-top: 0;
+  flex: 1;
+  min-width: 120px;
+}
+.prompt-header-meta-inline {
+  margin-left: auto;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 360px;
+}
 .prompt-header .ver-badge {
   font-size: 0.75rem; background: rgba(38,102,127,0.12); color: #1f5165;
   border-radius: 999px; padding: 2px 9px; white-space: nowrap;
@@ -473,9 +506,27 @@ button:hover { transform: translateY(-1px); filter: saturate(1.15); }
   border-radius: 999px; background: rgba(38,102,127,0.12);
   color: #1f5165; font-size: 0.8rem;
 }
+.chip-overflow {
+  background: rgba(23,32,38,0.08);
+  color: var(--muted);
+}
 
 /* ── Expanded detail ── */
 .prompt-detail { border-top: 1px solid var(--border); padding: 14px; display: grid; gap: 14px; }
+
+.audit-block {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid rgba(38,102,127,0.14);
+  border-radius: 12px;
+  background: rgba(38,102,127,0.05);
+}
+
+.audit-line {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
 
 .detail-section h4 {
   margin: 0 0 8px; font-size: 0.85rem; text-transform: uppercase;
@@ -555,6 +606,12 @@ button:hover { transform: translateY(-1px); filter: saturate(1.15); }
 }
 .version-item-header:hover { background: rgba(0,0,0,0.05); }
 .version-item-header span { font-size: 0.85rem; font-weight: 700; flex: 1; }
+.version-item-header .version-audit {
+  flex: 0 1 auto;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--muted);
+}
 .version-item-body { padding: 10px 12px; }
 
 /* ── Status messages ── */

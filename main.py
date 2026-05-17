@@ -1,3 +1,4 @@
+import datetime
 import logging
 import os
 import sys
@@ -35,11 +36,12 @@ from schemas import (
     PromptData,
     PromptOptimizeResponse,
     PromptOut,
+    PromptVersionOut,
     PromptTagsUpdate,
     PromptUpdate,
-    PromptVersionOut,
     ProjectAccessUpdate,
     ProjectUpdate,
+    RefreshTokenRequest,
     UserBootstrap,
     UserCreate,
     UserLogin,
@@ -51,7 +53,7 @@ app = FastAPI(title="Local Prompt Man")
 app.mount("/ui", StaticFiles(directory="ui"), name="ui")
 
 CONSOLE_LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
-SHOW_CONSOLE_SOURCE = CONSOLE_LOG_LEVEL in {"DEBUG", "TRACE"}
+SHOW_CONSOLE_SOURCE = os.getenv("SHOW_CONSOLE_SOURCE", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _console_log_format(record: dict) -> str:
@@ -60,7 +62,6 @@ def _console_log_format(record: dict) -> str:
 
     message = _escape_markup(record["message"])
     source = f"{_escape_markup(record['name'])}:{_escape_markup(record['function'])}:{record['line']}"
-
     badge = "<white>APP     </white>"
     message_color = "<level>"
 
@@ -89,7 +90,7 @@ def _console_log_format(record: dict) -> str:
     source_part = f" <cyan>{source}</cyan> " if SHOW_CONSOLE_SOURCE else ""
 
     return (
-        f"<dim>{record['time']:YYYY-MM-DD HH:mm:ss.SSS}</dim> "
+        f"<dim>{record['time'].astimezone(datetime.timezone.utc):YYYY-MM-DD HH:mm:ss.SSS} UTC</dim> "
         f"{badge} "
         f"<level>{record['level'].name:<8}</level> "
         f"{source_part}"
@@ -117,7 +118,7 @@ def configure_logging() -> None:
         enqueue=True,
         backtrace=True,
         diagnose=False,
-        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level} | {name}:{function}:{line} | {message}",
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS!UTC} UTC | {level} | {name}:{function}:{line} | {message}",
     )
 
     # Uvicorn access logs have their own formatter and make console output inconsistent
@@ -220,6 +221,14 @@ def allowed_projects(current_user: User) -> list[str] | None:
     return auth_service.allowed_projects_for_user(current_user)
 
 
+def normalize_utc_datetime(value: datetime.datetime | None) -> datetime.datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=datetime.timezone.utc)
+    return value.astimezone(datetime.timezone.utc)
+
+
 def to_prompt_out(db: Session, prompt: Prompt) -> PromptOut:
     latest = crud.get_latest_version(db, prompt.id)
     if not latest:
@@ -227,6 +236,10 @@ def to_prompt_out(db: Session, prompt: Prompt) -> PromptOut:
     return PromptOut(
         name=prompt.name,
         project=prompt.project,
+        created_at=normalize_utc_datetime(prompt.created_at),
+        updated_at=normalize_utc_datetime(prompt.updated_at),
+        created_by_username=crud.resolve_audit_username(db, prompt.created_by_ref),
+        updated_by_username=crud.resolve_audit_username(db, prompt.updated_by_ref),
         tags=[tag.name for tag in prompt.tags],
         latest_version=latest.version,
         role=latest.role,
@@ -235,6 +248,20 @@ def to_prompt_out(db: Session, prompt: Prompt) -> PromptOut:
         constraints=latest.constraints,
         output_format=latest.output_format,
         examples=latest.examples,
+    )
+
+
+def to_prompt_version_out(db: Session, version) -> PromptVersionOut:  # type: ignore[no-untyped-def]
+    return PromptVersionOut(
+        version=version.version,
+        created_at=normalize_utc_datetime(version.created_at),
+        created_by_username=crud.resolve_audit_username(db, version.created_by_ref),
+        role=version.role,
+        task=version.task,
+        context=version.context,
+        constraints=version.constraints,
+        output_format=version.output_format,
+        examples=version.examples,
     )
 
 
@@ -255,7 +282,7 @@ def bootstrap_admin(data: UserBootstrap, db: Session = Depends(get_db)) -> AuthR
         is_active=True,
         projects=[],
     )
-    return AuthResponse(access_token=auth_service.issue_token_for_user(user), user=to_user_out(user))
+    return AuthResponse(**auth_service.build_auth_response(user))
 
 
 @app.post("/auth/login", response_model=AuthResponse)
@@ -263,7 +290,12 @@ def login(data: UserLogin, db: Session = Depends(get_db)) -> AuthResponse:
     user = auth_service.authenticate_user(db, data.username, data.password)
     if not user:
         raise HTTPException(401, "Invalid credentials")
-    return AuthResponse(access_token=auth_service.issue_token_for_user(user), user=to_user_out(user))
+    return AuthResponse(**auth_service.build_auth_response(user))
+
+
+@app.post("/auth/refresh", response_model=AuthResponse)
+def refresh_auth(data: RefreshTokenRequest, db: Session = Depends(get_db)) -> AuthResponse:
+    return AuthResponse(**auth_service.refresh_session(db, data.refresh_token))
 
 
 @app.get("/auth/status", response_model=AuthStatus)
@@ -313,7 +345,7 @@ def update_user(user_id: int, data: UserUpdate, db: Session = Depends(get_db), c
     user = crud.get_user_by_id(db, user_id)
     if not user:
         raise HTTPException(404, "User not found")
-    if current_admin.id == user.id and data.role == "developer":
+    if current_admin.id == user.id and data.role is not None and data.role != "admin":
         raise HTTPException(400, "Admin cannot remove own admin role")
     updated = auth_service.update_user_record(
         db,
@@ -442,7 +474,7 @@ def list_prompts(
 
 
 @app.post("/prompts", response_model=PromptOut)
-def create_prompt(data: PromptCreate, db: Session = Depends(get_db), current_user: User = Depends(auth_service.get_current_user)) -> PromptOut:
+def create_prompt(data: PromptCreate, db: Session = Depends(get_db), current_user: User = Depends(auth_service.require_write_access)) -> PromptOut:
     logger.info("prompt.create name={} project={}", data.name, data.project)
     auth_service.ensure_project_access(current_user, data.project)
     prompt = crud.get_prompt(db, data.name, data.project, allowed_projects=allowed_projects(current_user))
@@ -456,6 +488,7 @@ def create_prompt(data: PromptCreate, db: Session = Depends(get_db), current_use
             data.name,
             data.project,
             task=data.task,
+            actor_id=current_user.id,
             role=data.role,
             context=data.context,
             constraints=data.constraints,
@@ -480,7 +513,7 @@ def get_prompt(project: str, name: str, db: Session = Depends(get_db), current_u
 
 
 @app.delete("/prompts/{project}/{name}", status_code=204)
-def delete_prompt(project: str, name: str, db: Session = Depends(get_db), current_user: User = Depends(auth_service.get_current_user)) -> Response:
+def delete_prompt(project: str, name: str, db: Session = Depends(get_db), current_user: User = Depends(auth_service.require_write_access)) -> Response:
     logger.info("prompt.delete project={} name={}", project, name)
     auth_service.ensure_project_access(current_user, project)
     prompt = crud.get_prompt(db, name, project, allowed_projects=allowed_projects(current_user))
@@ -493,7 +526,7 @@ def delete_prompt(project: str, name: str, db: Session = Depends(get_db), curren
 
 
 @app.put("/prompts/{project}/{name}", response_model=PromptVersionOut)
-def update_prompt(project: str, name: str, data: PromptUpdate, db: Session = Depends(get_db), current_user: User = Depends(auth_service.get_current_user)) -> PromptVersionOut:
+def update_prompt(project: str, name: str, data: PromptUpdate, db: Session = Depends(get_db), current_user: User = Depends(auth_service.require_write_access)) -> PromptVersionOut:
     logger.info("prompt.update project={} name={}", project, name)
     auth_service.ensure_project_access(current_user, project)
     prompt = crud.get_prompt(db, name, project, allowed_projects=allowed_projects(current_user))
@@ -502,13 +535,14 @@ def update_prompt(project: str, name: str, data: PromptUpdate, db: Session = Dep
         raise HTTPException(404, "Prompt not found")
 
     if data.tags is not None:
-        crud.set_prompt_tags(db, prompt, data.tags)
+        crud.set_prompt_tags(db, prompt, data.tags, actor_id=current_user.id)
 
     try:
         new_version = crud.add_version(
             db,
             prompt.id,
             task=data.task,
+            actor_id=current_user.id,
             role=data.role,
             context=data.context,
             constraints=data.constraints,
@@ -518,25 +552,17 @@ def update_prompt(project: str, name: str, data: PromptUpdate, db: Session = Dep
     except ValueError as exc:
         logger.warning("prompt.update.conflict project={} name={} error={}", project, name, str(exc))
         raise HTTPException(409, str(exc)) from exc
-    return PromptVersionOut(
-        version=new_version.version,
-        role=new_version.role,
-        task=new_version.task,
-        context=new_version.context,
-        constraints=new_version.constraints,
-        output_format=new_version.output_format,
-        examples=new_version.examples,
-    )
+    return to_prompt_version_out(db, new_version)
 
 
 @app.put("/prompts/{project}/{name}/tags", response_model=PromptOut)
-def update_prompt_tags(project: str, name: str, data: PromptTagsUpdate, db: Session = Depends(get_db), current_user: User = Depends(auth_service.get_current_user)) -> PromptOut:
+def update_prompt_tags(project: str, name: str, data: PromptTagsUpdate, db: Session = Depends(get_db), current_user: User = Depends(auth_service.require_write_access)) -> PromptOut:
     auth_service.ensure_project_access(current_user, project)
     prompt = crud.get_prompt(db, name, project, allowed_projects=allowed_projects(current_user))
     if not prompt:
         raise HTTPException(404, "Prompt not found")
 
-    crud.set_prompt_tags(db, prompt, data.tags)
+    crud.set_prompt_tags(db, prompt, data.tags, actor_id=current_user.id)
     # Reload prompt from database to ensure all relationships are properly populated
     prompt = crud.get_prompt(db, name, project, allowed_projects=allowed_projects(current_user))
     if not prompt:
@@ -552,18 +578,7 @@ def list_versions(project: str, name: str, db: Session = Depends(get_db), curren
         raise HTTPException(404, "Prompt not found")
 
     versions = crud.list_versions(db, prompt.id)
-    return [
-        PromptVersionOut(
-            version=v.version,
-            role=v.role,
-            task=v.task,
-            context=v.context,
-            constraints=v.constraints,
-            output_format=v.output_format,
-            examples=v.examples,
-        )
-        for v in versions
-    ]
+    return [to_prompt_version_out(db, v) for v in versions]
 
 
 @app.get("/prompts/{project}/{name}/versions/{version}", response_model=PromptVersionOut)
@@ -577,19 +592,11 @@ def get_version(project: str, name: str, version: int, db: Session = Depends(get
     if not v:
         raise HTTPException(404, "Version not found")
 
-    return PromptVersionOut(
-        version=v.version,
-        role=v.role,
-        task=v.task,
-        context=v.context,
-        constraints=v.constraints,
-        output_format=v.output_format,
-        examples=v.examples,
-    )
+    return to_prompt_version_out(db, v)
 
 
 @app.post("/optimize/greaterprompt", response_model=PromptOptimizeResponse)
-def optimize_prompt(data: PromptData, db: Session = Depends(get_db), current_user: User = Depends(auth_service.get_current_user)) -> PromptOptimizeResponse:
+def optimize_prompt(data: PromptData, db: Session = Depends(get_db), current_user: User = Depends(auth_service.require_write_access)) -> PromptOptimizeResponse:
     logger.info("optimize.greaterprompt.start")
     result = optimize_with_greaterprompt(data.model_dump(), get_personal_config(db, current_user))
     logger.info("optimize.greaterprompt.done engine={}", result.engine)
@@ -613,7 +620,7 @@ def optimize_prompt(data: PromptData, db: Session = Depends(get_db), current_use
 
 
 @app.post("/optimize/llm", response_model=PromptOptimizeResponse)
-def optimize_prompt_llm(data: PromptData, db: Session = Depends(get_db), current_user: User = Depends(auth_service.get_current_user)) -> PromptOptimizeResponse:
+def optimize_prompt_llm(data: PromptData, db: Session = Depends(get_db), current_user: User = Depends(auth_service.require_write_access)) -> PromptOptimizeResponse:
     logger.info("optimize.llm.start")
     result = optimize_with_llm(data.model_dump(), get_personal_config(db, current_user))
     logger.info("optimize.llm.done engine={}", result.engine)
@@ -649,7 +656,7 @@ def get_optimize_config(db: Session = Depends(get_db), current_user: User = Depe
 
 
 @app.put("/optimize/config", response_model=OptimizeConfigOut)
-def update_optimize_config(data: OptimizeConfigUpdate, db: Session = Depends(get_db), current_user: User = Depends(auth_service.get_current_user)) -> OptimizeConfigOut:
+def update_optimize_config(data: OptimizeConfigUpdate, db: Session = Depends(get_db), current_user: User = Depends(auth_service.require_write_access)) -> OptimizeConfigOut:
     logger.info(
         "optimize.config.update clear_model_id={} model_id={} gp_profile={} llm_model={} rounds={}",
         data.clear_model_id,
