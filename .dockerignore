@@ -1,0 +1,42 @@
+# VCS
+.git
+.gitignore
+
+# Local Python environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editor/OS artifacts
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local runtime artifacts
+logs/
+*.db
+*.sqlite
+*.sqlite3
+
+# Test and load-test artifacts
+tests/
+loadtests/results/
+
+# Local images and misc artifacts
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# Build and packaging artifacts
+build/
+dist/
+*.egg-info/
+
+# Node dependencies if ever added
+node_modules/
