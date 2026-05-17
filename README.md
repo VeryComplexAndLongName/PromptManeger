@@ -1,47 +1,48 @@
 # Prompt Man
 
-Local FastAPI + Vue app for storing, versioning, tagging, and optimizing prompt templates.
-
-## Main Purpose Snapshot
+Local FastAPI + Vue application for storing, versioning, tagging, securing, and optimizing prompt templates.
 
 ![Main Program Purpose](screen2.png)
 
+## Program Snapshot
+
 ![Screenshot 1](1.png)
 ![Screenshot 2](2.png)
-
-
+![Screenshot 2](3.png)
+![Screenshot 2](4.png)
 
 ## Key Features
 
-- Prompt storage by `project` + `name`
-- Immutable prompt version history
-- Tagging with AND/OR search
-- Prompt deletion with cascading cleanup
-- Structured prompt fields:
-  - `role` (optional)
-  - `task` (required)
-  - `context` (optional)
-  - `constraints` (optional)
-  - `output_format` (optional)
-  - `examples` (optional)
-- Split optimization actions in UI:
-  - default click: `Optimize Prompt` -> GreaterPrompt flow
-  - dropdown item: `Optimize Prompt with LLM` -> LLM flow
-- Multi-provider LLM support (Ollama, OpenAI, Anthropic)
-- Dynamic LLM model discovery from provider
-- Runtime optimization tuning without restart via `GET/PUT /optimize/config`:
-  - GreaterPrompt: `model_id`, `rounds`, `gp_profile`
-  - LLM: `llm_provider`, `llm_model`, `base_url`, `llm_api_token` (encrypted), `llm_timeout_seconds`
-- Reoptimize button for in-place optimization modal refinement
+- Prompt storage by `project` + `name` with immutable version history.
+- Structured prompt fields: `role`, `task`, `context`, `constraints`, `output_format`, `examples`.
+- Tagging plus AND/OR search.
+- Server-side prompt pagination with `X-Total-Count`.
+- Prompt delete with cascading cleanup of versions and access data.
+- Two optimization paths:
+  - `Optimize Prompt` -> GreaterPrompt
+  - `Optimize Prompt with LLM` -> provider-backed LLM flow
+- GreaterPrompt profiles: `fast`, `quality`, `ultra`.
+- Multi-provider LLM support: Ollama, OpenAI, Anthropic.
+- Dynamic provider model discovery.
+- Per-user optimization config persisted in the database.
+- Authentication for REST API and UI.
+- 30-minute access tokens with refresh-token based session renewal.
+- RBAC with `admin`, `developer`, and `viewer` roles.
+- Admin UI for project CRUD, user CRUD, and project access assignment.
+- Normalized database schema with dedicated `projects` and `roles` tables.
+- Prompt audit metadata: created/updated timestamps plus the user who made the change.
+- Sensitive config values encrypted at rest.
+- Automatic database migration on startup.
+- Default bootstrap admin support for first run.
 
 ## Requirements
 
 - Python 3.11+
-- `uv` (recommended) or pip
+- `uv` recommended, or plain `pip`
 
 ## Setup
 
-### Using uv (recommended)
+### Using uv
 
 ```powershell
 uv sync --extra dev
@@ -64,89 +65,192 @@ alembic upgrade head
 uvicorn main:app --reload
 ```
 
+On startup the app applies Alembic migrations automatically before serving requests.
+
 - UI: http://127.0.0.1:8000
 - API docs: http://127.0.0.1:8000/docs
 
+## First Run And Authentication
+
+The application is protected by authentication for both UI and API access.
+
+- On a clean database, the login screen switches into bootstrap mode.
+- The first admin can be created through `POST /auth/bootstrap-admin` or from the UI.
+- Startup also ensures a default admin exists when the database is empty.
+- Current default bootstrap credentials are `admin` / `admin`.
+
+Authenticated users receive a bearer token and all protected API routes require it.
+
+Session behavior:
+
+- Access token lifetime is 30 minutes.
+- Login/bootstrap returns both an access token and a refresh token.
+- `POST /auth/refresh` issues a new token pair when the access token has expired but the refresh token is still valid.
+- The UI refreshes the session automatically on `401` caused by an expired access token.
+- The UI also schedules a proactive refresh 1-3 minutes before access token expiry.
+
+## RBAC And Access Model
+
+- `admin`
+  - full access to all prompts and all projects
+  - can manage users, roles view, projects, and project assignments
+- `developer`
+  - can only access prompts in explicitly assigned projects
+  - has personal optimization config but no admin management access
+- `viewer`
+  - can read all prompts and personal config
+  - cannot create, update, optimize, or delete anything
+
+Roles are stored in a dedicated `roles` table. API responses still expose role names such as `admin` and `developer`.
+
+## Database Model
+
+The database is normalized internally while the external prompt API still works with project names.
+
+- `projects`
+  - reference table for project names
+- `prompts.project_id`
+  - foreign key to `projects.id`
+- `project_access.project_id`
+  - foreign key to `projects.id`
+- `roles`
+  - reference table for RBAC roles
+- `users.role_id`
+  - foreign key to `roles.id`
+- `configs.user_id`
+  - one-to-one per-user optimization config
+- `prompts.created_at` / `prompts.updated_at`
+  - prompt-level audit timestamps
+- `prompts.created_by_id` / `prompts.updated_by_id`
+  - prompt-level audit actor references
+- `prompt_versions.created_at`
+  - version creation timestamp
+- `prompt_versions.created_by_id`
+  - version author reference
+
+Deleting a project cascades to related prompt and access rows.
+
 ## UI Overview
 
-### Browse tab
+### Browse Tab
 
-- Expand prompt card to view latest structured prompt and versions.
-- Browse uses server-side pagination.
-- The UI requests prompt slices with optional `limit` and `offset`.
-- `Optimize Prompt` (main click) runs GreaterPrompt optimization.
-- `Optimize Prompt with LLM` (dropdown item) runs LLM optimization.
-- Optimization result opens in modal.
-- `Update Prompt` in modal saves optimized data as a new version.
-- `Delete Prompt` removes the prompt and all its versions (with confirmation).
+- View prompts by project/name.
+- Filter by project and tag.
+- Expand a prompt to inspect latest content and version history.
+- See who created the prompt, who updated it last, and when those actions happened.
+- All user-visible prompt audit timestamps are shown explicitly in UTC.
+- Edit tags, create a new version, optimize, and delete prompts when the role has write access.
+- Viewer sees the same data in read-only mode.
 
-### Create tab
+### Create Tab
 
-- Fill prompt metadata (`name`, `project`, `tags`) and `Prompt Data` group box.
-- `Optimize Prompt` main click uses GreaterPrompt.
-- Dropdown includes `Optimize Prompt with LLM`.
-- `Update Prompt` in modal applies optimized values back to Create form.
+- Create a prompt with required `name`, `project`, and `task`.
+- Fill optional structured fields.
+- Preview the composed prompt.
+- Optimize before saving.
+
+### Config Tab
+
+- Manage personal optimization settings.
+- Configure LLM provider, model, base URL, timeout, and token.
+- Configure GreaterPrompt profile, model, and rounds.
+- Save settings per user.
+- Reuse the saved config in both optimize endpoints and model discovery.
+- Viewer can inspect config values but cannot save changes.
+- The session banner shows UTC expiry time, a live expiry countdown, and the next scheduled refresh time.
+
+### Admin Tab
+
+Visible for admins only.
+
+- Project CRUD.
+- User CRUD.
+- Assign project access to users.
+- View role and active/inactive state.
+- Project and user lists are scrollable to keep the page compact.
+
+Viewer does not have access to this tab.
 
 ### Optimization Modal
 
-When optimization completes, a modal shows the result with two sections:
+- Shows optimization engine, notes, execution log, and composed markdown.
+- Supports `Reoptimize` without leaving the modal.
+- Supports applying optimized content back into Create or Browse flows.
 
-**LLM Settings** (when using LLM optimization):
-- **LLM Provider:** Dropdown to switch between Ollama, OpenAI, Anthropic Claude
-- **LLM Model:** Dynamically populated based on provider; fetched from provider's model list
-- **Base URL:** Auto-updates when provider changes; editable for custom endpoints
-- **API Token:** Appears only for OpenAI and Anthropic; masked input for security
-  - Shows "✓ Token is configured" if one is already saved
-  - Token is encrypted on server, never exposed in API responses
-- **LLM Timeout (seconds):** Timeout for LLM API calls
+### Session Handling In UI
 
-**GreaterPrompt Settings** (always available):
-- **GreaterPrompt Profile:** `fast` or `quality` preset
-- **GreaterPrompt Model ID (optional):** For gradient-mode optimization
-- **Gradient Rounds:** Number of rounds for GreaterPrompt optimization
+- The sign-in screen explains the 30-minute access-token lifetime.
+- The app retries authenticated API requests once after refreshing the session.
+- The app schedules refresh automatically 1-3 minutes before token expiry.
+- The session banner displays both the remaining access-token lifetime and the next scheduled refresh countdown.
+- Prompt cards and version history show audit metadata directly in the UI.
 
-**Action Buttons:**
-- **Save Config:** Persists all settings (including encrypted token) for next session
-- **Reoptimize:** Re-runs optimization with current settings without closing modal
-- **Update Prompt:** Accepts the result and updates the prompt version
+## Per-User Optimization Config
 
-## Optimization Endpoints
+Each user has a separate optimization config row in `configs`.
 
-### 1) GreaterPrompt optimization
+- `GET /optimize/config` returns the current user's config.
+- `PUT /optimize/config` updates the current user's config.
+- `POST /optimize/greaterprompt` uses the current user's config.
+- `POST /optimize/llm` uses the current user's config.
+- `GET /optimize/providers/{provider}/models` uses the current user's config as the default override source.
+
+One user's changes do not modify another user's config.
+
+## Optimization Features
+
+### GreaterPrompt
+
+Endpoint:
 
 ```text
 POST /optimize/greaterprompt
 ```
 
-- Default path behind main `Optimize Prompt` button.
-- Uses gradient mode if configured, otherwise lightweight fallback.
+- Main UI optimize path.
+- Uses gradient mode when a GreaterPrompt model is configured.
+- Falls back to lightweight mode when gradient optimization is unavailable.
 
-### 2) LLM optimization
+Profiles:
+
+- `fast`
+  - lowest cost / lowest latency
+- `quality`
+  - more candidates and filtering
+- `ultra`
+  - heaviest preset with more aggressive generation settings
+
+### LLM Optimization
+
+Endpoint:
 
 ```text
 POST /optimize/llm
 ```
 
-- Used by `Optimize Prompt with LLM` menu item.
-- By default uses local Ollama configuration.
+- Secondary optimize path in the split-button menu.
+- Supports Ollama, OpenAI, and Anthropic.
+- Uses strict JSON response parsing plus fallback cleanup/repair logic.
 
-### 3) Runtime optimization config
+### Model Discovery
+
+Endpoint:
 
 ```text
-GET /optimize/config
-PUT /optimize/config
+GET /optimize/providers/{provider}/models
 ```
 
-- Change optimization configuration in runtime, without restarting server.
-- Supports both GreaterPrompt and LLM configuration.
+- Ollama: discovered via provider API.
+- OpenAI: discovered via provider API when a token is supplied.
+- Anthropic: fixed built-in list.
 
-Example update (GreaterPrompt + Ollama):
+## Optimization Config Example
 
 ```json
 {
   "model_id": null,
   "rounds": 2,
-  "gp_profile": "fast",
+  "gp_profile": "ultra",
   "llm_provider": "ollama",
   "llm_model": "qwen2.5:0.5b",
   "llm_base_url": "http://127.0.0.1:11434",
@@ -155,209 +259,128 @@ Example update (GreaterPrompt + Ollama):
 }
 ```
 
-Example update (OpenAI with token):
+## Security Notes
 
-```json
-{
-  "llm_provider": "openai",
-  "llm_model": "gpt-4-turbo",
-  "llm_base_url": "https://api.openai.com/v1",
-  "llm_api_token": "sk-...",
-  "llm_timeout_seconds": 300
-}
-```
-
-**API Token Security:**
-- `llm_api_token` is optional and only required for providers that need authentication (OpenAI, Anthropic)
-- Token is encrypted on the server using Fernet encryption with a machine-specific key
-- API responses never return the token value, only a boolean flag indicating if one is configured (`effective_has_llm_api_token`)
-- Token is only decrypted internally when actually needed for API calls
-- Never expose plaintext tokens in logs or responses
-
-`gp_profile` options:
-
-- `fast` (default): lower candidate count and lighter generation for CPU-friendly latency
-- `quality`: more candidates + stricter filtering for better output quality with higher cost
-
-When gradient mode is enabled (`model_id` set), the active profile controls GreaterPrompt optimizer internals.
-
-## Optimization Config Recommendations
-
-### Multi-Provider LLM Support
-
-The application supports three LLM providers out of the box:
-
-#### Ollama (Local)
-
-- **Default provider** for local inference
-- **Base URL:** `http://127.0.0.1:11434`
-- **Authentication:** Not required (no token)
-- **Available models:** Dynamically discovered from Ollama `/api/tags`
-- **Use case:** Local CPU/GPU inference, no API costs, full privacy
-
-Recommended models:
-- CPU-only: `qwen2.5:0.5b`, `llama3.2:1b`, `phi3:mini`
-- GPU: `llama3.1:8b`, `qwen2.5:7b`, `gemma2:9b`
-
-#### OpenAI
-
-- **Base URL:** `https://api.openai.com/v1` (or custom endpoint)
-- **Authentication:** Required — set `llm_api_token` to your API key
-- **Available models:** `gpt-4`, `gpt-4-turbo`, `gpt-3.5-turbo`
-- **Use case:** Cloud-based inference, latest models, higher quality
-
-Setup:
-1. Get API key from https://platform.openai.com/api-keys
-2. In UI: Select **OpenAI** from LLM Provider dropdown
-3. Enter API token in **API Token** field
-4. Select model
-5. Click **Save Config**
-
-#### Anthropic Claude
-
-- **Base URL:** `https://api.anthropic.com` (or custom endpoint)
-- **Authentication:** Required — set `llm_api_token` to your API key
-- **Available models:** `claude-3-opus`, `claude-3-sonnet`, `claude-3-haiku`
-- **Use case:** Alternative cloud provider, strong reasoning capabilities
-
-Setup:
-1. Get API key from https://console.anthropic.com/
-2. In UI: Select **Anthropic Claude** from LLM Provider dropdown
-3. Enter API token in **API Token** field
-4. Select model
-5. Click **Save Config**
-
-### Default in this project
-
-Current runtime default is configured for local Ollama on CPU-friendly model:
-
-- `llm_provider`: `ollama`
-- `llm_model`: `qwen2.5:0.5b`
-- `base_url`: `http://127.0.0.1:11434`
-- `llm_timeout_seconds`: `300`
-- `gp_profile`: `fast`
-
-### If you DO NOT have GPU (CPU-only)
-
-Recommended Ollama models (faster and lighter):
-
-1. `qwen2.5:0.5b` (ultra-light default)
-2. `llama3.2:1b` (very light, fast)
-3. `phi3:mini` (good quality/speed on CPU)
-
-Tips:
-
-- Keep model size small (1B-3B class) for acceptable latency.
-- Expect slower response than GPU, especially for long prompts.
-- Prefer LLM optimization mode for practical local usage.
-- For gradient mode on CPU, start with:
-  - `gp_profile=fast`
-  - `rounds=2`
-
-### If you HAVE GPU
-
-Recommended options:
-
-1. Ollama medium models (for better quality):
-   - `llama3.1:8b`
-   - `qwen2.5:7b`
-   - `gemma2:9b`
-2. GreaterPrompt gradient mode with supported HF model:
-   - set `model_id` (runtime config or `GREATERPROMPT_MODEL_ID`)
-   - keep `rounds` in range 2-4 initially
-
-Tips:
-
-- Start with LLM mode for responsiveness, then evaluate gradient mode where needed.
-- Watch VRAM usage before increasing model size or rounds.
-- For gradient mode on GPU, try:
-  - `gp_profile=quality`
-  - `rounds=3-5`
-
-### GreaterPrompt Profiles (runtime)
-
-These presets are applied when gradient optimization is enabled.
-
-#### `fast` profile
-
-- `candidates_topk=4`
-- `intersect_q=1`
-- `filter=false`
-- `generate_config`:
-  - `max_new_tokens=160`
-  - `temperature=0.25`
-  - `top_p=0.9`
-  - `repetition_penalty=1.05`
-  - `no_repeat_ngram_size=2`
-  - `do_sample=true`
-
-#### `quality` profile
-
-- `candidates_topk=8`
-- `intersect_q=2`
-- `filter=true`
-- `generate_config`:
-  - `max_new_tokens=220`
-  - `temperature=0.35`
-  - `top_p=0.9`
-  - `repetition_penalty=1.1`
-  - `no_repeat_ngram_size=3`
-  - `do_sample=true`
+- Password hashes are stored encrypted.
+- LLM API tokens are stored encrypted.
+- API responses never return plaintext token values.
+- Tokens are decrypted only when needed for provider calls.
+- Refresh tokens are signed and verified separately from access tokens.
 
 ## Environment Variables
 
-- `DATABASE_URL` (default: `sqlite:///./prompts.db`)
-- `GREATERPROMPT_MODEL_ID` (optional fallback for gradient mode)
-- `GREATERPROMPT_ROUNDS` (optional fallback, default `2`)
-- `GREATERPROMPT_PROFILE` (optional fallback: `fast` or `quality`, default `fast`)
-- `OPTIMIZE_LLM_PROVIDER` (optional fallback, default `ollama`)
-- `OPTIMIZE_LLM_MODEL` (optional fallback, default `qwen2.5:0.5b`)
-- `OLLAMA_BASE_URL` (optional fallback, default `http://127.0.0.1:11434`)
-- `OPTIMIZE_LLM_TIMEOUT_SECONDS` (optional fallback, default `300`)
-- `OPTIMIZE_LLM_API_TOKEN` (optional encrypted API token for OpenAI/Anthropic)
-- `PROMPTMAN_KEY` (optional encryption key for token; if not set, uses machine hostname)
+- `DATABASE_URL`
+  - default: `sqlite:///./prompts.db`
+- `BOOTSTRAP_ADMIN_USERNAME`
+  - optional first-run admin username override
+- `BOOTSTRAP_ADMIN_PASSWORD`
+  - optional first-run admin password override
+- `PROMPTMAN_KEY`
+  - optional machine/app key source for encryption
+- `GREATERPROMPT_MODEL_ID`
+  - fallback GreaterPrompt model when no per-user runtime override exists
+- `GREATERPROMPT_ROUNDS`
+  - fallback round count
+- `GREATERPROMPT_PROFILE`
+  - fallback profile: `fast`, `quality`, `ultra`
+- `OPTIMIZE_LLM_PROVIDER`
+  - fallback provider
+- `OPTIMIZE_LLM_MODEL`
+  - fallback model
+- `OLLAMA_BASE_URL`
+  - fallback base URL for local/default provider usage
+- `OPTIMIZE_LLM_TIMEOUT_SECONDS`
+  - fallback timeout
+- `OPTIMIZE_LLM_API_TOKEN`
+  - fallback encrypted token source
 
-Runtime config from `/optimize/config` has higher priority than env variables for the running process.
+Per-user config returned by `/optimize/config` takes precedence over environment defaults for that user's optimize flows.
 
-## Prompt API (Core)
+## API Surface
+
+### Auth
+
+- `POST /auth/bootstrap-admin`
+- `POST /auth/login`
+- `POST /auth/refresh`
+- `GET /auth/status`
+- `GET /auth/me`
+
+`POST /auth/login`, `POST /auth/bootstrap-admin`, and `POST /auth/refresh` return:
+
+- `access_token`
+- `refresh_token`
+- `access_token_ttl_seconds`
+- `refresh_token_ttl_seconds`
+- `access_token_expires_at`
+- `refresh_token_expires_at`
+- `user`
+
+### Roles
+
+- `GET /roles`
+
+Admin-only read of available RBAC roles.
+
+### Users
+
+- `GET /users`
+- `POST /users`
+- `GET /users/{user_id}`
+- `PUT /users/{user_id}`
+- `PUT /users/{user_id}/projects`
+- `DELETE /users/{user_id}`
+
+### Projects
+
+- `GET /projects`
+- `GET /projects/{project_id}`
+- `POST /projects`
+- `PUT /projects/{project_id}`
+- `DELETE /projects/{project_id}`
+
+### Prompts
 
 - `GET /prompts`
-  - optional query params:
-    - `limit`: max number of prompts to return
-    - `offset`: number of prompts to skip
-  - when omitted, returns all matching prompts
-  - response header `X-Total-Count` contains total number of matching prompts before pagination
+  - query params: `project`, `tag`, `limit`, `offset`
+  - response header: `X-Total-Count`
+  - each prompt includes `created_at`, `updated_at`, `created_by_username`, `updated_by_username`
 - `GET /prompts/search`
+  - query params: repeated `tags`, `mode`, optional `project`
 - `POST /prompts`
 - `GET /prompts/{project}/{name}`
 - `PUT /prompts/{project}/{name}`
 - `DELETE /prompts/{project}/{name}`
-  - Deletes the prompt and all associated versions and tags
-  - Returns `204 No Content` on success
-  - Returns `404 Not Found` if prompt doesn't exist
 - `PUT /prompts/{project}/{name}/tags`
 - `GET /prompts/{project}/{name}/versions`
 - `GET /prompts/{project}/{name}/versions/{version}`
 
-## Prompt Version Uniqueness
+Each version response includes:
 
-- `prompt_versions` now enforces uniqueness for the full content tuple:
+- `created_at`
+- `created_by_username`
+- prompt component fields
+
+### Optimize
+
+- `POST /optimize/greaterprompt`
+- `POST /optimize/llm`
+- `GET /optimize/config`
+- `PUT /optimize/config`
+- `GET /optimize/providers/{provider}/models`
+
+## Prompt Uniqueness Rules
+
+- Prompt identity is unique by `name + project_id` internally.
+- Prompt versions enforce uniqueness for the full content tuple:
   - `role`, `task`, `context`, `constraints`, `output_format`, `examples`
-- API-level protection is also enabled before insert:
-  - `POST /prompts` and `PUT /prompts/{project}/{name}` return `409 Conflict`
-    when the same content tuple already exists in `prompt_versions`.
-- Alembic migration includes a duplicate-data pre-check and stops with a clear error
-  if existing duplicates are found. Deduplicate old rows first, then re-run migration.
+- Duplicate version content returns `409 Conflict`.
 
-## Pagination Example
+## Notes For Operators
 
-Get all prompts:
-
-```text
-GET /prompts
-```
-
-Get only part of prompts:
+- The UI and API expose prompt projects by name for usability.
+- The database stores project and role references by foreign key.
+- If you inspect SQLite directly, expect `project_id` and `role_id` rather than string columns in normalized tables.
 
 ```text
 GET /prompts?limit=10&offset=20

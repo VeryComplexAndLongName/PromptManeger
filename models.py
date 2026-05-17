@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, CheckConstraint, Column, ForeignKey, Integer, String, Table, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, Integer, String, Table, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, relationship
 
 from database import Base
@@ -47,10 +47,16 @@ class Prompt(Base):
     id: Mapped[int] = Column(Integer, primary_key=True, index=True)  # type: ignore[assignment]
     name: Mapped[str] = Column(String, index=True, nullable=False)  # type: ignore[assignment]
     project_id: Mapped[int] = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False)  # type: ignore[assignment]
+    created_at: Mapped[DateTime] = Column(DateTime(timezone=True), nullable=False, server_default=func.now())  # type: ignore[assignment]
+    updated_at: Mapped[DateTime] = Column(DateTime(timezone=True), nullable=False, server_default=func.now())  # type: ignore[assignment]
+    created_by_id: Mapped[int | None] = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)  # type: ignore[assignment]
+    updated_by_id: Mapped[int | None] = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)  # type: ignore[assignment]
 
     project_ref: Mapped["Project"] = relationship("Project", back_populates="prompts")
     versions: Mapped[list["PromptVersion"]] = relationship("PromptVersion", back_populates="prompt", cascade="all, delete-orphan")
     tags: Mapped[list["Tag"]] = relationship("Tag", secondary=prompt_tags, back_populates="prompts")
+    created_by_ref: Mapped["User | None"] = relationship("User", foreign_keys=[created_by_id], back_populates="created_prompts")
+    updated_by_ref: Mapped["User | None"] = relationship("User", foreign_keys=[updated_by_id], back_populates="updated_prompts")
 
     @property
     def project(self) -> str:
@@ -73,6 +79,9 @@ class User(Base):
     role_ref: Mapped["Role"] = relationship("Role", back_populates="users")
     config: Mapped["Config | None"] = relationship("Config", back_populates="user", cascade="all, delete-orphan", uselist=False)
     project_access: Mapped[list["ProjectAccess"]] = relationship("ProjectAccess", back_populates="user", cascade="all, delete-orphan")
+    created_prompts: Mapped[list["Prompt"]] = relationship("Prompt", foreign_keys="Prompt.created_by_id", back_populates="created_by_ref")
+    updated_prompts: Mapped[list["Prompt"]] = relationship("Prompt", foreign_keys="Prompt.updated_by_id", back_populates="updated_by_ref")
+    created_prompt_versions: Mapped[list["PromptVersion"]] = relationship("PromptVersion", foreign_keys="PromptVersion.created_by_id", back_populates="created_by_ref")
 
     @property
     def role(self) -> str:
@@ -142,6 +151,8 @@ class PromptVersion(Base):
     id: Mapped[int] = Column(Integer, primary_key=True, index=True)  # type: ignore[assignment]
     prompt_id: Mapped[int] = Column(Integer, ForeignKey("prompts.id", ondelete="CASCADE"))  # type: ignore[assignment]
     version: Mapped[int] = Column(Integer)  # type: ignore[assignment]
+    created_at: Mapped[DateTime] = Column(DateTime(timezone=True), nullable=False, server_default=func.now())  # type: ignore[assignment]
+    created_by_id: Mapped[int | None] = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)  # type: ignore[assignment]
     role: Mapped[str | None] = Column(String, nullable=True)  # type: ignore[assignment]
     task: Mapped[str] = Column(Text, nullable=False)  # type: ignore[assignment]
     context: Mapped[str | None] = Column(Text, nullable=True)  # type: ignore[assignment]
@@ -150,3 +161,4 @@ class PromptVersion(Base):
     examples: Mapped[str | None] = Column(Text, nullable=True)  # type: ignore[assignment]
 
     prompt: Mapped["Prompt"] = relationship("Prompt", back_populates="versions")
+    created_by_ref: Mapped["User | None"] = relationship("User", foreign_keys=[created_by_id], back_populates="created_prompt_versions")

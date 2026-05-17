@@ -1,14 +1,17 @@
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from types import ModuleType
 
 import pytest
 from sqlalchemy import insert
+from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import sessionmaker
 
 import crud
 import auth_service
 from database import Base, init_database
-from models import Project, Prompt, Role
+from models import Project, Prompt, Role, Tag
 from optimizer_service import (
     _normalize_text,
     _parse_ollama_json_response,
@@ -170,3 +173,59 @@ def test_init_database_and_bootstrap_seed_default_roles(db_session):  # type: ig
     roles = db_session.query(Role).order_by(Role.name.asc()).all()
 
     assert [role.name for role in roles] == ["admin", "developer"]
+
+
+def test_concurrent_create_prompt_with_shared_new_tag_is_race_safe(tmp_path):  # type: ignore[no-untyped-def]
+    db_path = tmp_path / "race_test.db"
+    engine = create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+    )
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    try:
+        bootstrap_session = SessionLocal()
+        try:
+            crud.get_or_create_project(bootstrap_session, "race-project")
+            bootstrap_session.commit()
+        finally:
+            bootstrap_session.close()
+
+        def _worker(index: int) -> tuple[bool, str | None]:
+            session = SessionLocal()
+            try:
+                crud.create_prompt(
+                    session,
+                    name=f"race-prompt-{index}",
+                    project="race-project",
+                    task=f"task-{index}",
+                    role="assistant",
+                    context=f"context-{index}",
+                    constraints="none",
+                    output_format="text",
+                    examples=f"example-{index}",
+                    tags=["race-shared-tag"],
+                )
+                return True, None
+            except Exception as exc:  # pragma: no cover - captures unexpected race failures
+                return False, str(exc)
+            finally:
+                session.close()
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(_worker, range(12)))
+
+        failures = [error for ok, error in results if not ok]
+        assert failures == []
+
+        verify_session = SessionLocal()
+        try:
+            prompts_count = verify_session.query(Prompt).filter(Prompt.name.like("race-prompt-%")).count()
+            tags_count = verify_session.query(Tag).filter(Tag.name == "race-shared-tag").count()
+            assert prompts_count == 12
+            assert tags_count == 1
+        finally:
+            verify_session.close()
+    finally:
+        engine.dispose()

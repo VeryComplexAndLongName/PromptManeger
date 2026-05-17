@@ -1,9 +1,27 @@
+from datetime import datetime, timezone
+
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from models import Config, Project, ProjectAccess, Prompt, PromptVersion, Role, Tag, User
 
-DEFAULT_ROLE_NAMES = ("admin", "developer")
+DEFAULT_ROLE_NAMES = ("admin", "developer", "viewer")
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def get_default_admin_user(db: Session) -> User | None:
+    return get_user_by_username(db, "admin")
+
+
+def resolve_audit_username(db: Session, user: User | None) -> str:
+    if user and user.username:
+        return user.username
+    admin_user = get_default_admin_user(db)
+    return admin_user.username if admin_user else "admin"
 
 
 def has_duplicate_prompt_version_content(
@@ -137,15 +155,25 @@ def get_or_create_tags(db: Session, tags: list[str]) -> list[Tag]:
     if not tags:
         return []
 
-    existing = db.query(Tag).filter(Tag.name.in_(tags)).all()
-    existing_names = {tag.name for tag in existing}
+    normalized_tags = sorted(set(tags))
+    existing = db.query(Tag).filter(Tag.name.in_(normalized_tags)).all()
+    by_name = {tag.name: tag for tag in existing}
 
-    new_tags = [Tag(name=tag_name) for tag_name in tags if tag_name not in existing_names]
-    if new_tags:
-        db.add_all(new_tags)
-        db.flush()
+    for tag_name in normalized_tags:
+        if tag_name in by_name:
+            continue
+        tag = Tag(name=tag_name)
+        try:
+            with db.begin_nested():
+                db.add(tag)
+                db.flush()
+            by_name[tag_name] = tag
+        except IntegrityError:
+            existing_tag = db.query(Tag).filter(Tag.name == tag_name).first()
+            if existing_tag:
+                by_name[tag_name] = existing_tag
 
-    return [*existing, *new_tags]
+    return [by_name[tag_name] for tag_name in normalized_tags if tag_name in by_name]
 
 
 def create_prompt(
@@ -153,6 +181,7 @@ def create_prompt(
     name: str,
     project: str,
     task: str,
+    actor_id: int | None = None,
     role: str | None = None,
     context: str | None = None,
     constraints: str | None = None,
@@ -174,8 +203,16 @@ def create_prompt(
     normalized_tags = normalize_tags(tags)
     db_tags = get_or_create_tags(db, normalized_tags)
     project_record = get_or_create_project(db, project)
+    now = _utcnow()
 
-    prompt = Prompt(name=name, project_ref=project_record)
+    prompt = Prompt(
+        name=name,
+        project_ref=project_record,
+        created_at=now,
+        updated_at=now,
+        created_by_id=actor_id,
+        updated_by_id=actor_id,
+    )
     prompt.tags = db_tags
     db.add(prompt)
     db.flush()
@@ -184,6 +221,8 @@ def create_prompt(
     version = PromptVersion(
         prompt_id=prompt.id,
         version=1,
+        created_at=now,
+        created_by_id=actor_id,
         role=role,
         task=task,
         context=context,
@@ -201,7 +240,7 @@ def get_prompt(db: Session, name: str, project: str, allowed_projects: list[str]
     query = (
         db.query(Prompt)
         .join(Prompt.project_ref)
-        .options(joinedload(Prompt.project_ref))
+        .options(joinedload(Prompt.project_ref), joinedload(Prompt.created_by_ref), joinedload(Prompt.updated_by_ref))
         .filter(Prompt.name == name, Project.name == normalize_project_name(project))
     )
     if allowed_projects is not None:
@@ -223,7 +262,11 @@ def _build_prompt_list_query(
     allowed_projects: list[str] | None = None,
 ):  # type: ignore[no-untyped-def]
     query = db.query(Prompt)
-    query = query.join(Prompt.project_ref).options(joinedload(Prompt.project_ref))
+    query = query.join(Prompt.project_ref).options(
+        joinedload(Prompt.project_ref),
+        joinedload(Prompt.created_by_ref),
+        joinedload(Prompt.updated_by_ref),
+    )
 
     if allowed_projects is not None:
         if not allowed_projects:
@@ -267,6 +310,7 @@ def list_prompts(
 def get_latest_version(db: Session, prompt_id: int) -> PromptVersion | None:
     return (
         db.query(PromptVersion)
+        .options(joinedload(PromptVersion.created_by_ref))
         .filter_by(prompt_id=prompt_id)
         .order_by(PromptVersion.version.desc())
         .first()
@@ -277,12 +321,17 @@ def add_version(
     db: Session,
     prompt_id: int,
     task: str,
+    actor_id: int | None = None,
     role: str | None = None,
     context: str | None = None,
     constraints: str | None = None,
     output_format: str | None = None,
     examples: str | None = None,
 ) -> PromptVersion:
+    prompt = db.query(Prompt).filter(Prompt.id == prompt_id).first()
+    if not prompt:
+        raise ValueError(f"Prompt {prompt_id} not found")
+
     latest = get_latest_version(db, prompt_id)
     if not latest:
         raise ValueError(f"No latest version found for prompt {prompt_id}")
@@ -308,9 +357,13 @@ def add_version(
         examples=examples,
     ):
         raise ValueError("Duplicate prompt version content is not allowed")
+
+    now = _utcnow()
     new_version = PromptVersion(
         prompt_id=prompt_id,
         version=latest.version + 1,
+        created_at=now,
+        created_by_id=actor_id,
         role=role,
         task=task,
         context=context,
@@ -318,15 +371,21 @@ def add_version(
         output_format=output_format,
         examples=examples,
     )
+    prompt.updated_at = now
+    prompt.updated_by_id = actor_id
+    db.add(prompt)
     db.add(new_version)
     db.commit()
+    db.refresh(new_version)
     return new_version
 
 
-def set_prompt_tags(db: Session, prompt: Prompt, tags: list[str] | None) -> Prompt:
+def set_prompt_tags(db: Session, prompt: Prompt, tags: list[str] | None, actor_id: int | None = None) -> Prompt:
     normalized_tags = normalize_tags(tags)
     db_tags = get_or_create_tags(db, normalized_tags)
     prompt.tags = db_tags
+    prompt.updated_at = _utcnow()
+    prompt.updated_by_id = actor_id
     db.commit()
     db.refresh(prompt)
     return prompt
@@ -335,6 +394,7 @@ def set_prompt_tags(db: Session, prompt: Prompt, tags: list[str] | None) -> Prom
 def get_specific_version(db: Session, prompt_id: int, version: int) -> PromptVersion | None:
     return (
         db.query(PromptVersion)
+        .options(joinedload(PromptVersion.created_by_ref))
         .filter_by(prompt_id=prompt_id, version=version)
         .first()
     )
@@ -343,6 +403,7 @@ def get_specific_version(db: Session, prompt_id: int, version: int) -> PromptVer
 def list_versions(db: Session, prompt_id: int) -> list[PromptVersion]:
     results = (
         db.query(PromptVersion)
+        .options(joinedload(PromptVersion.created_by_ref))
         .filter_by(prompt_id=prompt_id)
         .order_by(PromptVersion.version.asc())
         .all()

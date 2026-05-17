@@ -1,9 +1,17 @@
 import pytest
+from sqlalchemy import text
 
 
 def test_prompt_crud_search_and_versions(client, sample_prompt_payload):  # type: ignore[no-untyped-def]
     create_response = client.post("/prompts", json=sample_prompt_payload)
     assert create_response.status_code == 200
+    created_prompt = create_response.json()
+    assert created_prompt["created_by_username"] == "admin"
+    assert created_prompt["updated_by_username"] == "admin"
+    assert created_prompt["created_at"]
+    assert created_prompt["updated_at"]
+    assert created_prompt["created_at"].endswith("Z") or "+00:00" in created_prompt["created_at"]
+    assert created_prompt["updated_at"].endswith("Z") or "+00:00" in created_prompt["updated_at"]
 
     list_response = client.get("/prompts")
     assert list_response.status_code == 200
@@ -36,6 +44,9 @@ def test_prompt_crud_search_and_versions(client, sample_prompt_payload):  # type
     )
     assert update_response.status_code == 200
     assert update_response.json()["version"] == 2
+    assert update_response.json()["created_by_username"] == "admin"
+    assert update_response.json()["created_at"]
+    assert update_response.json()["created_at"].endswith("Z") or "+00:00" in update_response.json()["created_at"]
 
     update_tags_response = client.put(
         "/prompts/payments/checkout-system/tags",
@@ -48,10 +59,38 @@ def test_prompt_crud_search_and_versions(client, sample_prompt_payload):  # type
     assert versions_response.status_code == 200
     versions = versions_response.json()
     assert len(versions) == 2
+    assert versions[0]["created_by_username"] == "admin"
+    assert versions[1]["created_by_username"] == "admin"
+    assert versions[1]["created_at"]
+    assert versions[1]["created_at"].endswith("Z") or "+00:00" in versions[1]["created_at"]
+
+    updated_prompt_response = client.get("/prompts/payments/checkout-system")
+    assert updated_prompt_response.status_code == 200
+    updated_prompt = updated_prompt_response.json()
+    assert updated_prompt["updated_by_username"] == "admin"
+    assert updated_prompt["updated_at"]
 
     specific_version_response = client.get("/prompts/payments/checkout-system/versions/1")
     assert specific_version_response.status_code == 200
     assert specific_version_response.json()["task"] == sample_prompt_payload["task"]
+    assert specific_version_response.json()["created_by_username"] == "admin"
+
+
+def test_prompt_legacy_null_audit_authors_fall_back_to_admin(client, db_session, sample_prompt_payload):  # type: ignore[no-untyped-def]
+    assert client.post("/prompts", json=sample_prompt_payload).status_code == 200
+
+    db_session.execute(text("UPDATE prompts SET created_by_id = NULL, updated_by_id = NULL"))
+    db_session.execute(text("UPDATE prompt_versions SET created_by_id = NULL"))
+    db_session.commit()
+
+    prompt_response = client.get("/prompts/payments/checkout-system")
+    assert prompt_response.status_code == 200
+    assert prompt_response.json()["created_by_username"] == "admin"
+    assert prompt_response.json()["updated_by_username"] == "admin"
+
+    versions_response = client.get("/prompts/payments/checkout-system/versions")
+    assert versions_response.status_code == 200
+    assert all(item["created_by_username"] == "admin" for item in versions_response.json())
 
 
 def test_duplicate_prompt_version_content_returns_conflict(client, sample_prompt_payload):  # type: ignore[no-untyped-def]

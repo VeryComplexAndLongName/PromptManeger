@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Any
 
 from fastapi import Depends, HTTPException, Request, status
@@ -9,11 +10,22 @@ import crud
 from database import SessionLocal
 from models import Config, Role, User
 from optimizer_service import build_optimizer_config, get_runtime_optimizer_config
-from security import create_access_token, decrypt_secret, encrypt_secret, hash_password, verify_access_token, verify_password
+from security import (
+    ACCESS_TOKEN_TTL_SECONDS,
+    REFRESH_TOKEN_TTL_SECONDS,
+    create_access_token,
+    create_refresh_token,
+    decrypt_secret,
+    encrypt_secret,
+    hash_password,
+    verify_access_token,
+    verify_password,
+    verify_refresh_token,
+)
 
 _DEFAULT_BOOTSTRAP_ADMIN_USERNAME = "admin"
 _DEFAULT_BOOTSTRAP_ADMIN_PASSWORD = "admin"
-_DEFAULT_ROLE_NAMES = ("admin", "developer")
+_DEFAULT_ROLE_NAMES = ("admin", "developer", "viewer")
 
 
 def _normalize_role(value: str | None, db: Session) -> str:
@@ -31,8 +43,36 @@ def get_db_session():  # type: ignore[no-untyped-def]
         db.close()
 
 
-def issue_token_for_user(user: User) -> str:
-    return create_access_token(user_id=user.id, username=user.username, role=user.role)
+def issue_tokens_for_user(user: User) -> dict[str, Any]:
+    issued_at = int(time.time())
+    return {
+        "access_token": create_access_token(
+            user_id=user.id,
+            username=user.username,
+            role=user.role,
+            ttl_seconds=ACCESS_TOKEN_TTL_SECONDS,
+            now_ts=issued_at,
+        ),
+        "refresh_token": create_refresh_token(
+            user_id=user.id,
+            username=user.username,
+            role=user.role,
+            ttl_seconds=REFRESH_TOKEN_TTL_SECONDS,
+            now_ts=issued_at,
+        ),
+        "token_type": "bearer",
+        "access_token_ttl_seconds": ACCESS_TOKEN_TTL_SECONDS,
+        "refresh_token_ttl_seconds": REFRESH_TOKEN_TTL_SECONDS,
+        "access_token_expires_at": issued_at + ACCESS_TOKEN_TTL_SECONDS,
+        "refresh_token_expires_at": issued_at + REFRESH_TOKEN_TTL_SECONDS,
+    }
+
+
+def build_auth_response(user: User) -> dict[str, Any]:
+    return {
+        **issue_tokens_for_user(user),
+        "user": user_to_dict(user),
+    }
 
 
 def authenticate_user(db: Session, username: str, password: str) -> User | None:
@@ -135,14 +175,36 @@ def get_current_user(request: Request, db: Session = Depends(get_db_session)) ->
     return user
 
 
+def refresh_session(db: Session, refresh_token: str) -> dict[str, Any]:
+    payload = verify_refresh_token(refresh_token)
+    if not payload:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
+
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
+
+    user = crud.get_user_by_id(db, int(user_id))
+    if not user or not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid user")
+
+    return build_auth_response(user)
+
+
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin role required")
     return current_user
 
 
+def require_write_access(current_user: User = Depends(get_current_user)) -> User:
+    if current_user.role == "viewer":
+        raise HTTPException(status_code=403, detail="Viewer role is read-only")
+    return current_user
+
+
 def allowed_projects_for_user(user: User) -> list[str] | None:
-    if user.role == "admin":
+    if user.role == "admin" or user.role == "viewer":
         return None
     return [item.project for item in user.project_access]
 

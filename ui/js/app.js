@@ -1,4 +1,4 @@
-const { createApp, ref, computed, onMounted } = Vue;
+const { createApp, ref, computed, onMounted, onBeforeUnmount } = Vue;
 
 marked.setOptions({ breaks: true, gfm: true });
 const md        = (text) => marked.parse(text || "");
@@ -6,6 +6,9 @@ const parseTags = (raw)  => raw.split(",").map((t) => t.trim()).filter(Boolean);
 const tagsToStr = (tags) => tags.join(", ");
 const key       = (p)   => p.project + "/" + p.name;
 const AUTH_TOKEN_STORAGE_KEY = "promptman.access_token";
+const REFRESH_TOKEN_STORAGE_KEY = "promptman.refresh_token";
+const ACCESS_TOKEN_EXPIRES_AT_STORAGE_KEY = "promptman.access_token_expires_at";
+const NEXT_REFRESH_AT_STORAGE_KEY = "promptman.next_refresh_at";
 const emptyPromptData = () => ({
   role: "",
   task: "",
@@ -152,6 +155,10 @@ createApp({
     /* auth */
     const authReady = ref(false);
     const authToken = ref(window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || "");
+    const refreshToken = ref(window.localStorage.getItem(REFRESH_TOKEN_STORAGE_KEY) || "");
+    const accessTokenExpiresAt = ref(Number(window.localStorage.getItem(ACCESS_TOKEN_EXPIRES_AT_STORAGE_KEY) || 0));
+    const nextRefreshAt = ref(Number(window.localStorage.getItem(NEXT_REFRESH_AT_STORAGE_KEY) || 0));
+    const clockNow = ref(Date.now());
     const currentUser = ref(null);
     const authMode = ref("login");
     const authForm = ref({ username: "", password: "" });
@@ -214,7 +221,7 @@ createApp({
     const llmModelsLoadError = ref("");
 
     /* admin */
-    const roleOptions = ref([...defaultUserRoleOptions]);
+    const roleOptions = ref([...defaultUserRoleOptions, "viewer"]);
     const projects = ref([]);
     const projectsLoading = ref(false);
     const projectsStatus = ref("");
@@ -240,14 +247,53 @@ createApp({
     });
     const isAuthenticated = computed(() => !!currentUser.value);
     const isAdmin = computed(() => currentUser.value?.role === "admin");
+    const isViewer = computed(() => currentUser.value?.role === "viewer");
+    const canViewAdmin = computed(() => currentUser.value?.role === "admin");
+    const canWrite = computed(() => !!currentUser.value && currentUser.value.role !== "viewer");
     const availableProjectNames = computed(() => projects.value.map((project) => project.name));
     const currentUserProjectsLabel = computed(() => {
       if (!currentUser.value) return "";
-      if (currentUser.value.role === "admin") return "All projects";
+      if (["admin", "viewer"].includes(currentUser.value.role)) return "All projects";
       return (currentUser.value.projects || []).length ? currentUser.value.projects.join(", ") : "No assigned projects";
     });
 
-    const nowTime = () => new Date().toLocaleTimeString("ru-RU", { hour12: false });
+    const nowTime = () => new Date(clockNow.value).toISOString().replace("T", " ").replace("Z", " UTC");
+    let tokenRefreshPromise = null;
+    let proactiveRefreshTimerId = null;
+    let countdownTimerId = null;
+
+    const formatUtcDateTime = (value) => {
+      if (!value) return "unknown UTC";
+      const parsed = new Date(value);
+      if (Number.isNaN(parsed.getTime())) return `${String(value)} UTC`;
+      return parsed.toISOString().replace("T", " ").replace("Z", " UTC");
+    };
+
+    const formatAuditLine = (label, timestamp, username) => {
+      return `${label}: ${formatUtcDateTime(timestamp)}${username ? ` by ${username}` : ""}`;
+    };
+
+    const MAX_HEADER_TAGS = 3;
+    const visibleHeaderTags = (tags) => {
+      if (!Array.isArray(tags)) return [];
+      return tags.slice(0, MAX_HEADER_TAGS);
+    };
+    const hiddenHeaderTagCount = (tags) => {
+      if (!Array.isArray(tags)) return 0;
+      return Math.max(0, tags.length - MAX_HEADER_TAGS);
+    };
+
+    const formatCountdown = (targetTsSeconds) => {
+      if (!targetTsSeconds) return "not scheduled";
+      const remainingMs = Math.max(0, targetTsSeconds * 1000 - clockNow.value);
+      const totalSeconds = Math.floor(remainingMs / 1000);
+      const minutes = Math.floor(totalSeconds / 60);
+      const seconds = totalSeconds % 60;
+      return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+    };
+
+    const accessTokenCountdown = computed(() => formatCountdown(accessTokenExpiresAt.value));
+    const nextRefreshCountdown = computed(() => formatCountdown(nextRefreshAt.value));
 
     const setDefaultActiveTab = () => {
       activeTab.value = currentUser.value?.role === "admin" ? "admin" : "browse";
@@ -263,17 +309,58 @@ createApp({
         .filter(Boolean);
     };
 
-    const saveToken = (token) => {
-      authToken.value = token || "";
+    const clearProactiveRefresh = () => {
+      if (proactiveRefreshTimerId !== null) {
+        window.clearTimeout(proactiveRefreshTimerId);
+        proactiveRefreshTimerId = null;
+      }
+      nextRefreshAt.value = 0;
+      window.localStorage.removeItem(NEXT_REFRESH_AT_STORAGE_KEY);
+    };
+
+    const scheduleProactiveRefresh = () => {
+      clearProactiveRefresh();
+      if (!refreshToken.value || !accessTokenExpiresAt.value) {
+        return;
+      }
+
+      const leadTimeMs = 60_000 + Math.floor(Math.random() * 120_000);
+      const delayMs = Math.max(5_000, (accessTokenExpiresAt.value * 1000) - Date.now() - leadTimeMs);
+      nextRefreshAt.value = Math.floor((Date.now() + delayMs) / 1000);
+      window.localStorage.setItem(NEXT_REFRESH_AT_STORAGE_KEY, String(nextRefreshAt.value));
+      proactiveRefreshTimerId = window.setTimeout(async () => {
+        const refreshed = await refreshSession(false);
+        if (!refreshed) {
+          clearSession("Session expired. Please sign in again.");
+        }
+      }, delayMs);
+    };
+
+    const saveTokens = (accessToken, nextRefreshToken = refreshToken.value, nextAccessTokenExpiresAt = accessTokenExpiresAt.value) => {
+      authToken.value = accessToken || "";
+      refreshToken.value = nextRefreshToken || "";
+      accessTokenExpiresAt.value = Number(nextAccessTokenExpiresAt || 0);
       if (authToken.value) {
         window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, authToken.value);
       } else {
         window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
       }
+      if (refreshToken.value) {
+        window.localStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, refreshToken.value);
+      } else {
+        window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
+      }
+      if (accessTokenExpiresAt.value) {
+        window.localStorage.setItem(ACCESS_TOKEN_EXPIRES_AT_STORAGE_KEY, String(accessTokenExpiresAt.value));
+      } else {
+        window.localStorage.removeItem(ACCESS_TOKEN_EXPIRES_AT_STORAGE_KEY);
+      }
+      scheduleProactiveRefresh();
     };
 
     const clearSession = (reason = "") => {
-      saveToken("");
+      saveTokens("", "");
+      clearProactiveRefresh();
       currentUser.value = null;
       activeTab.value = "browse";
       items.value = [];
@@ -297,13 +384,67 @@ createApp({
       return merged;
     };
 
-    const apiFetch = async (url, options = {}, allow401 = false) => {
+    const consumeAuthPayload = (payload) => {
+      saveTokens(payload.access_token || "", payload.refresh_token || "", payload.access_token_expires_at || 0);
+      if (payload.user) {
+        currentUser.value = payload.user;
+      }
+    };
+
+    const refreshSession = async (showStatusMessage = true) => {
+      if (!refreshToken.value) {
+        return false;
+      }
+      if (tokenRefreshPromise) {
+        return tokenRefreshPromise;
+      }
+
+      tokenRefreshPromise = (async () => {
+        try {
+          const res = await fetch("/auth/refresh", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ refresh_token: refreshToken.value }),
+          });
+          if (!res.ok) {
+            return false;
+          }
+          const payload = await res.json();
+          consumeAuthPayload(payload);
+          if (showStatusMessage) {
+            authStatus.value = "Session refreshed.";
+          }
+          authError.value = "";
+          return true;
+        } catch (err) {
+          return false;
+        } finally {
+          tokenRefreshPromise = null;
+        }
+      })();
+
+      return tokenRefreshPromise;
+    };
+
+    const apiFetch = async (url, options = {}, retryOn401 = true) => {
       const requestOptions = {
         ...options,
         headers: authHeaders(options.headers || {}),
       };
-      const response = await fetch(url, requestOptions);
-      if (response.status === 401 && !allow401) {
+      let response = await fetch(url, requestOptions);
+      if (response.status === 401 && retryOn401 && refreshToken.value && !String(url).startsWith("/auth/refresh")) {
+        const refreshed = await refreshSession();
+        if (refreshed) {
+          response = await fetch(url, {
+            ...options,
+            headers: authHeaders(options.headers || {}),
+          });
+          if (response.status !== 401) {
+            return response;
+          }
+        }
+      }
+      if (response.status === 401) {
         clearSession("Session expired. Please sign in again.");
       }
       return response;
@@ -327,7 +468,7 @@ createApp({
     };
 
     const loadUsers = async () => {
-      if (!isAdmin.value) {
+      if (!canViewAdmin.value) {
         users.value = [];
         return;
       }
@@ -344,7 +485,7 @@ createApp({
     };
 
     const loadProjects = async () => {
-      if (!isAdmin.value) {
+      if (!canViewAdmin.value) {
         projects.value = [];
         return;
       }
@@ -361,13 +502,13 @@ createApp({
     };
 
     const loadRoles = async () => {
-      if (!isAdmin.value) {
-        roleOptions.value = [...defaultUserRoleOptions];
+      if (!canViewAdmin.value) {
+        roleOptions.value = [...defaultUserRoleOptions, "viewer"];
         return;
       }
       const res = await apiFetch("/roles");
       if (!res.ok) {
-        roleOptions.value = [...defaultUserRoleOptions];
+        roleOptions.value = [...defaultUserRoleOptions, "viewer"];
         return;
       }
       const roles = await res.json();
@@ -389,7 +530,7 @@ createApp({
       if (!authToken.value) {
         return false;
       }
-      const res = await apiFetch("/auth/me", {}, true);
+      const res = await apiFetch("/auth/me");
       if (!res.ok) {
         clearSession("");
         return false;
@@ -424,8 +565,7 @@ createApp({
           return;
         }
         const payload = await res.json();
-        saveToken(payload.access_token || "");
-        currentUser.value = payload.user || null;
+        consumeAuthPayload(payload);
         authForm.value.password = "";
         authStatus.value = authMode.value === "bootstrap" ? "Admin account created." : "Signed in.";
         await initializeAuthenticatedApp();
@@ -443,6 +583,7 @@ createApp({
     };
 
     const beginEditUser = (user) => {
+      if (!canWrite.value) return;
       editingUserId.value = user.id;
       editUserForm.value = {
         username: user.username || "",
@@ -457,6 +598,7 @@ createApp({
     const resolveFormState = (formRef) => formRef?.value ?? formRef ?? {};
 
     const toggleProjectSelection = (formRef, projectName) => {
+      if (!canWrite.value) return;
       const formState = resolveFormState(formRef);
       const current = new Set(normalizeProjects(formState.projects));
       if (current.has(projectName)) {
@@ -478,6 +620,7 @@ createApp({
     };
 
     const createProjectRecord = async () => {
+      if (!canWrite.value) return;
       projectsStatus.value = "";
       const res = await apiFetch("/projects", {
         method: "POST",
@@ -494,6 +637,7 @@ createApp({
     };
 
     const beginEditProject = (project) => {
+      if (!canWrite.value) return;
       editingProjectId.value = project.id;
       editProjectForm.value = { name: project.name || "" };
       projectsStatus.value = "";
@@ -505,6 +649,7 @@ createApp({
     };
 
     const saveProjectEdit = async (projectId) => {
+      if (!canWrite.value) return;
       projectsStatus.value = "";
       const res = await apiFetch(`/projects/${projectId}`, {
         method: "PUT",
@@ -523,6 +668,7 @@ createApp({
     };
 
     const deleteProjectRecord = async (project) => {
+      if (!canWrite.value) return;
       projectsStatus.value = "";
       if (!window.confirm(`Delete project ${project.name}? All related prompts and access rules will be removed.`)) return;
       const res = await apiFetch(`/projects/${project.id}`, { method: "DELETE" });
@@ -537,6 +683,7 @@ createApp({
     };
 
     const createUserAccount = async () => {
+      if (!canWrite.value) return;
       usersStatus.value = "";
       const payload = {
         username: newUserForm.value.username.trim(),
@@ -560,6 +707,7 @@ createApp({
     };
 
     const saveUserEdit = async (userId) => {
+      if (!canWrite.value) return;
       usersStatus.value = "";
       const payload = {
         username: editUserForm.value.username.trim(),
@@ -588,6 +736,7 @@ createApp({
     };
 
     const deleteUserAccount = async (user) => {
+      if (!canWrite.value) return;
       usersStatus.value = "";
       if (!window.confirm(`Delete user ${user.username}?`)) return;
       const res = await apiFetch(`/users/${user.id}`, { method: "DELETE" });
@@ -686,6 +835,7 @@ createApp({
     };
 
     const deletePrompt = async (p) => {
+      if (!canWrite.value) return;
       deleteStatus.value = "";
       const confirmed = window.confirm(`Delete prompt ${p.project} / ${p.name}? This cannot be undone.`);
       if (!confirmed) return;
@@ -708,6 +858,7 @@ createApp({
     };
 
     const saveNewVersion = async (p) => {
+      if (!canWrite.value) return;
       saveStatus.value = "";
       const res = await apiFetch("/prompts/" + p.project + "/" + p.name, {
         method: "PUT",
@@ -737,6 +888,7 @@ createApp({
     };
 
     const saveTags = async (p) => {
+      if (!canWrite.value) return;
       saveStatus.value = "";
       const res = await apiFetch("/prompts/" + p.project + "/" + p.name + "/tags", {
         method: "PUT",
@@ -750,6 +902,7 @@ createApp({
     };
 
     const createPrompt = async () => {
+      if (!canWrite.value) return;
       createStatus.value = "";
       const name = form.value.name.trim();
       const project = form.value.project.trim();
@@ -898,6 +1051,9 @@ createApp({
     };
 
     const persistOptimizeConfig = async (showSuccessMessage = true) => {
+      if (!canWrite.value) {
+        return false;
+      }
       optimizeConfigStatus.value = "";
       const payload = {
         model_id: optimizeConfig.value.model_id || null,
@@ -930,6 +1086,10 @@ createApp({
     };
 
     const optimizePrompt = async (endpoint, fields, source, target = null) => {
+      if (!canWrite.value) {
+        optimizerError.value = "Viewer role is read-only.";
+        return;
+      }
       optimizerLoading.value = true;
       optimizerError.value = "";
       optimizerStatus.value = "Optimization started";
@@ -1107,6 +1267,10 @@ createApp({
     };
 
     const applyOptimizedPrompt = async () => {
+      if (!canWrite.value) {
+        optimizerError.value = "Viewer role is read-only.";
+        return;
+      }
       if (optimizeInputSource.value === "create") {
         form.value.role = optimizedDraft.value.role || "";
         form.value.task = optimizedDraft.value.task || "";
@@ -1145,6 +1309,9 @@ createApp({
     };
 
     onMounted(async () => {
+      countdownTimerId = window.setInterval(() => {
+        clockNow.value = Date.now();
+      }, 1000);
       await fetchAuthStatus();
       if (await loadCurrentUser()) {
         await initializeAuthenticatedApp();
@@ -1152,8 +1319,16 @@ createApp({
       authReady.value = true;
     });
 
+    onBeforeUnmount(() => {
+      clearProactiveRefresh();
+      if (countdownTimerId !== null) {
+        window.clearInterval(countdownTimerId);
+        countdownTimerId = null;
+      }
+    });
+
     return {
-      authReady, authToken, currentUser, authMode, authForm, authError, authStatus, authBusy, authBootstrapRequired, isAuthenticated, isAdmin, currentUserProjectsLabel,
+      authReady, authToken, currentUser, authMode, authForm, authError, authStatus, authBusy, authBootstrapRequired, isAuthenticated, isAdmin, isViewer, canViewAdmin, canWrite, currentUserProjectsLabel,
       activeTab, form, createStatus,
       items, filterProject, filterTag, fetchPrompts, browsePage, browsePageSize, browseTotalItems, totalBrowsePages, paginatedItems, setBrowsePage, browseSummaryLabel,
       expandedKey, expandedVersions, openVersionKey,
@@ -1174,6 +1349,8 @@ createApp({
       submitAuth, logout, createProjectRecord, beginEditProject, cancelProjectEdit, saveProjectEdit, deleteProjectRecord,
       createUserAccount, beginEditUser, cancelUserEdit, saveUserEdit, deleteUserAccount, loadUsers, loadProjects,
       toggleProjectSelection, isProjectSelected,
+      visibleHeaderTags, hiddenHeaderTagCount,
+      formatUtcDateTime, formatAuditLine, accessTokenCountdown, nextRefreshCountdown, nextRefreshAt, accessTokenExpiresAt,
       md, buildPromptMarkdown,
       deleteStatus,
     };
@@ -1191,6 +1368,7 @@ createApp({
       <div class="auth-card">
         <h1>Prompt Man</h1>
         <p class="subtitle">{{ authBootstrapRequired ? 'Create the first admin account for this workspace.' : 'Sign in to access prompts and personal optimization config.' }}</p>
+        <p class="auth-helper">Access token lifetime is 30 minutes. The UI refreshes the session automatically while the refresh token is still valid.</p>
         <div class="field">
           <label>Username</label>
           <input v-model="authForm.username" placeholder="admin" />
@@ -1219,6 +1397,9 @@ createApp({
           <div>
             <div class="auth-banner-user">{{ currentUser.username }}</div>
             <div class="auth-banner-meta">Role: {{ currentUser.role }} | Projects: {{ currentUserProjectsLabel }}</div>
+            <div class="auth-banner-meta">Access token expires in: {{ accessTokenCountdown }} | Next refresh: {{ nextRefreshCountdown }}</div>
+            <div class="auth-banner-meta">Access token expiry at: {{ formatUtcDateTime(accessTokenExpiresAt * 1000) }}</div>
+            <div v-if="nextRefreshAt" class="auth-banner-meta">Next scheduled refresh at: {{ formatUtcDateTime(nextRefreshAt * 1000) }}</div>
           </div>
           <button class="ghost" @click="logout">Logout</button>
         </div>
@@ -1227,9 +1408,9 @@ createApp({
 
     <div class="tabs">
       <button class="tab-btn" :class="{active: activeTab==='browse'}" @click="activeTab='browse'">Browse</button>
-      <button class="tab-btn" :class="{active: activeTab==='create'}" @click="activeTab='create'">+ Create</button>
+      <button v-if="canWrite" class="tab-btn" :class="{active: activeTab==='create'}" @click="activeTab='create'">+ Create</button>
       <button class="tab-btn" :class="{active: activeTab==='config'}" @click="activeTab='config'">Config</button>
-      <button v-if="isAdmin" class="tab-btn" :class="{active: activeTab==='admin'}" @click="activeTab='admin'">Admin</button>
+      <button v-if="canViewAdmin" class="tab-btn" :class="{active: activeTab==='admin'}" @click="activeTab='admin'">Admin</button>
     </div>
 
     <!-- BROWSE TAB -->
@@ -1269,25 +1450,33 @@ createApp({
         <div class="prompt-card" v-for="p in paginatedItems" :key="key(p)">
 
           <div class="prompt-header" @click="togglePrompt(p)">
-            <h3>{{ p.project }} / {{ p.name }}</h3>
-            <span class="ver-badge">v{{ p.latest_version }}</span>
-            <div class="chips" style="margin-top:0; flex:2">
-              <span class="chip" v-for="t in p.tags" :key="t">{{ t }}</span>
+            <div class="prompt-header-main">
+              <h3>{{ p.project }} / {{ p.name }}</h3>
             </div>
+            <div class="chips prompt-header-chips">
+              <span class="chip" v-for="t in visibleHeaderTags(p.tags)" :key="t">{{ t }}</span>
+              <span class="chip chip-overflow" v-if="hiddenHeaderTagCount(p.tags) > 0">+{{ hiddenHeaderTagCount(p.tags) }}</span>
+            </div>
+            <div class="prompt-header-meta prompt-header-meta-inline">{{ formatAuditLine('Updated', p.updated_at, p.updated_by_username) }}</div>
+            <span class="ver-badge">v{{ p.latest_version }}</span>
             <span class="expand-icon" :class="{open: expandedKey===key(p)}">&#9660;</span>
           </div>
 
           <div class="prompt-detail" v-if="expandedKey===key(p)">
+            <div class="audit-block">
+              <div class="audit-line">{{ formatAuditLine('Created', p.created_at, p.created_by_username) }}</div>
+              <div class="audit-line">{{ formatAuditLine('Updated', p.updated_at, p.updated_by_username) }}</div>
+            </div>
 
             <!-- Tags -->
             <div class="detail-section">
               <h4>Tags</h4>
-              <div v-if="!editTagsMode">
+              <div v-if="!editTagsMode || !canWrite">
                 <div class="chips">
                   <span class="chip" v-for="t in p.tags" :key="t">{{ t }}</span>
                   <em v-if="p.tags.length===0" style="color:var(--muted);font-size:0.85rem">none</em>
                 </div>
-                <div class="btn-row">
+                <div class="btn-row" v-if="canWrite">
                   <button class="ghost" @click="editTagsMode=true; editTagsStr=p.tags.join(', ')">Edit tags</button>
                 </div>
               </div>
@@ -1307,7 +1496,7 @@ createApp({
             <div class="detail-section">
               <h4>Latest content &mdash; v{{ p.latest_version }}</h4>
               <div class="md-content" v-html="md(buildPromptMarkdown(p))"></div>
-              <div class="btn-row" style="margin-top:12px">
+              <div class="btn-row" style="margin-top:12px" v-if="canWrite">
                 <div class="split-wrap">
                   <button class="split-btn secondary" @click.stop="optimizeFromBrowse(p)">
                     <span class="split-main-label">Optimize Prompt</span>
@@ -1320,11 +1509,12 @@ createApp({
                 </div>
                 <button class="danger" @click.stop="deletePrompt(p)">Delete Prompt</button>
               </div>
+              <p v-if="isViewer" style="margin-top:12px;color:var(--muted)">Viewer role can inspect prompts but cannot optimize, edit, or delete them.</p>
               <p v-if="deleteStatus" :class="deleteStatus.includes('failed') ? 'status-err' : 'status-ok'">{{ deleteStatus }}</p>
             </div>
 
             <!-- New version editor -->
-            <div class="detail-section">
+            <div class="detail-section" v-if="canWrite">
               <div class="section-title-row">
                 <h4 style="margin:0">Create new version</h4>
                 <button class="ghost" @click="newVersionEditorOpen = !newVersionEditorOpen">
@@ -1380,6 +1570,7 @@ createApp({
                 <div class="version-item" v-for="v in expandedVersions.slice().reverse()" :key="v.version">
                   <div class="version-item-header" @click="openVersionKey = (openVersionKey===v.version ? null : v.version)">
                     <span>Version {{ v.version }}</span>
+                    <span class="version-audit">{{ formatUtcDateTime(v.created_at) }}<template v-if="v.created_by_username"> by {{ v.created_by_username }}</template></span>
                     <span style="font-size:0.75rem;color:var(--muted)">{{ openVersionKey===v.version ? 'hide' : 'show' }}</span>
                   </div>
                   <div class="version-item-body" v-if="openVersionKey===v.version">
@@ -1401,7 +1592,7 @@ createApp({
     </div>
 
     <!-- CREATE TAB -->
-    <div class="tab-panel" v-if="activeTab==='create'">
+    <div class="tab-panel" v-if="activeTab==='create' && canWrite">
       <h2 style="margin-top:0">New Prompt</h2>
       <div class="create-grid">
         <div class="field">
@@ -1468,6 +1659,7 @@ createApp({
     <div class="tab-panel" v-if="activeTab==='config'">
       <h2 style="margin-top:0">Optimization Config</h2>
       <p style="margin:0 0 12px;color:var(--muted)">Manage active settings for LLM and GreaterPrompt optimization. These settings are stored per user.</p>
+      <p v-if="isViewer" style="margin:0 0 12px;color:var(--muted)">Viewer role is read-only. Configuration values are visible but cannot be changed.</p>
 
       <div class="opt-config-box opt-config-box-standalone">
         <div class="opt-settings-group">
@@ -1476,7 +1668,7 @@ createApp({
             <button
               class="ghost opt-refresh-btn"
               @click="loadAvailableLlmModels(optimizeConfig.llm_provider)"
-              :disabled="llmModelsLoading"
+              :disabled="llmModelsLoading || !canWrite"
               title="Refresh available models for current API key"
             >
               {{ llmModelsLoading ? "Loading..." : "Refresh Models" }}
@@ -1485,13 +1677,13 @@ createApp({
           <div class="create-grid">
             <div class="field">
               <label>LLM Provider</label>
-              <select class="select-pretty" v-model="optimizeConfig.llm_provider" @change="updateProviderBaseUrl(optimizeConfig.llm_provider); loadAvailableLlmModels(optimizeConfig.llm_provider, false)">
+              <select class="select-pretty" v-model="optimizeConfig.llm_provider" :disabled="!canWrite" @change="updateProviderBaseUrl(optimizeConfig.llm_provider); loadAvailableLlmModels(optimizeConfig.llm_provider, false)">
                 <option v-for="provider in llmProviderOptions" :key="provider" :value="provider">{{ getProviderLabel(provider) }}</option>
               </select>
             </div>
             <div class="field">
               <label>LLM Model</label>
-              <select class="select-pretty" v-model="optimizeConfig.llm_model" :disabled="llmModelsLoading">
+              <select class="select-pretty" v-model="optimizeConfig.llm_model" :disabled="llmModelsLoading || !canWrite">
                 <option v-for="m in availableLlmModels" :key="m" :value="m">{{ m }}</option>
               </select>
             </div>
@@ -1499,22 +1691,22 @@ createApp({
           <div class="create-grid">
             <div class="field">
               <label>Base URL</label>
-              <input v-model="optimizeConfig.llm_base_url" @change="loadAvailableLlmModels(optimizeConfig.llm_provider)" placeholder="http://127.0.0.1:11434" />
+              <input v-model="optimizeConfig.llm_base_url" :disabled="!canWrite" @change="loadAvailableLlmModels(optimizeConfig.llm_provider)" placeholder="http://127.0.0.1:11434" />
             </div>
             <div class="field" v-if="modelRequiresToken()" style="max-width:220px">
               <label>API Token</label>
-              <input type="password" v-model="optimizeConfig.llm_api_token" :placeholder="optimizeConfig.effective_has_llm_api_token ? 'Token already set' : 'Enter your API token'" />
+              <input type="password" v-model="optimizeConfig.llm_api_token" :disabled="!canWrite" :placeholder="optimizeConfig.effective_has_llm_api_token ? 'Token already set' : 'Enter your API token'" />
               <p v-if="optimizeConfig.effective_has_llm_api_token" style="margin:4px 0 0;color:var(--muted);font-size:0.82rem">✓ Token is configured</p>
             </div>
             <div class="field" v-else style="max-width:220px">
               <label>LLM Timeout (seconds)</label>
-              <input type="number" min="5" v-model.number="optimizeConfig.llm_timeout_seconds" />
+              <input type="number" min="5" v-model.number="optimizeConfig.llm_timeout_seconds" :disabled="!canWrite" />
             </div>
           </div>
           <div class="create-grid" v-if="modelRequiresToken()">
             <div class="field" style="max-width:220px">
               <label>LLM Timeout (seconds)</label>
-              <input type="number" min="5" v-model.number="optimizeConfig.llm_timeout_seconds" />
+              <input type="number" min="5" v-model.number="optimizeConfig.llm_timeout_seconds" :disabled="!canWrite" />
             </div>
           </div>
           <p v-if="llmModelsLoading" style="margin:4px 0 0;color:var(--muted);font-size:0.84rem">Loading available models...</p>
@@ -1526,13 +1718,13 @@ createApp({
           <div class="create-grid">
             <div class="field">
               <label>GreaterPrompt Profile</label>
-              <select class="select-pretty" v-model="optimizeConfig.gp_profile">
+              <select class="select-pretty" v-model="optimizeConfig.gp_profile" :disabled="!canWrite">
                 <option v-for="p in gpProfileOptions" :key="p" :value="p">{{ p }}</option>
               </select>
             </div>
             <div class="field">
               <label>GreaterPrompt Model (optional)</label>
-              <select class="select-pretty" v-model="optimizeConfig.model_id">
+              <select class="select-pretty" v-model="optimizeConfig.model_id" :disabled="!canWrite">
                 <option value="">No model selected (lightweight mode)</option>
                 <optgroup v-for="group in gpRecommendedModelGroups" :key="group" :label="group">
                   <option
@@ -1554,7 +1746,7 @@ createApp({
           </div>
           <div class="field" style="max-width:180px">
             <label>Gradient Rounds</label>
-            <input type="number" min="1" v-model.number="optimizeConfig.rounds" />
+            <input type="number" min="1" v-model.number="optimizeConfig.rounds" :disabled="!canWrite" />
           </div>
           <div class="gp-model-table-wrap">
             <div class="gp-model-table-title">Recommended Models</div>
@@ -1563,6 +1755,7 @@ createApp({
                 type="button"
                 class="gp-model-card gp-model-card-empty"
                 :class="{ active: !optimizeConfig.model_id }"
+                :disabled="!canWrite"
                 @click="optimizeConfig.model_id = ''"
               >
                 <div class="gp-model-card-top">
@@ -1594,6 +1787,7 @@ createApp({
                     'gp-model-card-supported': model.supported === '✔',
                     'gp-model-card-compatible': model.supported !== '✔'
                   }"
+                  :disabled="!canWrite"
                   v-for="model in gpModelsByGroup[group]"
                   :key="model.value"
                   @click="optimizeConfig.model_id = model.value"
@@ -1623,7 +1817,7 @@ createApp({
           </div>
         </div>
 
-        <div class="btn-row" style="margin-top:12px">
+        <div class="btn-row" style="margin-top:12px" v-if="canWrite">
           <button class="secondary" @click="saveOptimizeConfig">Save Config</button>
         </div>
         <p v-if="optimizeConfigStatus" :class="optimizeConfigStatus.includes('Failed') ? 'status-err' : 'status-ok'">{{ optimizeConfigStatus }}</p>
@@ -1632,23 +1826,23 @@ createApp({
         </p>
       </div>
 
-      <div v-if="isAdmin" class="admin-panel">
+      <div v-if="canViewAdmin" class="admin-panel">
         <div class="admin-panel-header">
           <div>
-            <h3>Admin tools moved</h3>
-            <p>Project and user management are now available in the dedicated Admin tab.</p>
+            <h3>{{ isViewer ? 'Read-only admin data' : 'Admin tools moved' }}</h3>
+            <p>{{ isViewer ? 'Viewer can inspect projects, users, and roles in the Admin tab.' : 'Project and user management are now available in the dedicated Admin tab.' }}</p>
           </div>
           <button class="secondary" @click="activeTab='admin'">Open Admin</button>
         </div>
       </div>
     </div>
 
-    <div class="tab-panel" v-if="activeTab==='admin' && isAdmin">
+    <div class="tab-panel" v-if="activeTab==='admin' && canViewAdmin">
       <div class="admin-panel" style="margin-top:0;border-top:none;padding-top:0">
         <div class="admin-panel-header">
           <div>
             <h3>Administration</h3>
-            <p>Manage projects, users, and project access rights.</p>
+            <p>{{ canWrite ? 'Manage projects, users, and project access rights.' : 'Viewer mode: inspect projects, users, and roles without making changes.' }}</p>
           </div>
           <button class="ghost" @click="Promise.all([loadRoles(), loadProjects(), loadUsers()])" :disabled="usersLoading || projectsLoading">{{ (usersLoading || projectsLoading) ? 'Loading...' : 'Refresh Admin Data' }}</button>
         </div>
@@ -1656,18 +1850,18 @@ createApp({
         <div class="admin-grid">
           <div class="admin-card">
             <h4>Projects</h4>
-            <div class="field">
+            <div class="field" v-if="canWrite">
               <label>New Project Name</label>
               <input v-model="newProjectForm.name" placeholder="payments" />
             </div>
-            <div class="btn-row">
+            <div class="btn-row" v-if="canWrite">
               <button class="secondary" @click="createProjectRecord">Create Project</button>
             </div>
             <p v-if="projectsStatus" :class="projectsStatus.includes('Failed') ? 'status-err' : 'status-ok'">{{ projectsStatus }}</p>
             <p v-if="!projects.length && !projectsLoading" style="color:var(--muted)">No projects yet.</p>
             <div class="project-list">
               <div class="project-row" v-for="project in projects" :key="project.id">
-                <div v-if="editingProjectId===project.id" class="project-edit-row">
+                <div v-if="canWrite && editingProjectId===project.id" class="project-edit-row">
                   <input v-model="editProjectForm.name" />
                   <div class="btn-row">
                     <button class="secondary" @click="saveProjectEdit(project.id)">Save</button>
@@ -1676,7 +1870,7 @@ createApp({
                 </div>
                 <div v-else class="project-row-static">
                   <div class="project-name">{{ project.name }}</div>
-                  <div class="btn-row">
+                  <div class="btn-row" v-if="canWrite">
                     <button class="ghost" @click="beginEditProject(project)">Rename</button>
                     <button class="danger" @click="deleteProjectRecord(project)">Delete</button>
                   </div>
@@ -1685,7 +1879,7 @@ createApp({
             </div>
           </div>
 
-          <div class="admin-card">
+          <div class="admin-card" v-if="canWrite">
             <h4>Create User</h4>
             <div class="field">
               <label>Username</label>
@@ -1748,7 +1942,7 @@ createApp({
                   </div>
                 </div>
 
-                <div v-if="editingUserId===user.id" class="user-editor">
+                <div v-if="canWrite && editingUserId===user.id" class="user-editor">
                   <div class="field">
                     <label>Username</label>
                     <input v-model="editUserForm.username" />
@@ -1794,7 +1988,7 @@ createApp({
                   </div>
                 </div>
 
-                <div v-else class="btn-row">
+                <div v-else class="btn-row" v-if="canWrite">
                   <button class="ghost" @click="beginEditUser(user)">Edit</button>
                   <button class="danger" :disabled="currentUser.id===user.id" @click="deleteUserAccount(user)">Delete</button>
                 </div>
@@ -1842,7 +2036,7 @@ createApp({
             <span class="chip" v-for="(note, idx) in optimizerNotes" :key="idx">{{ note }}</span>
           </div>
           <div class="md-content" style="margin-top:10px" v-html="md(optimizedMarkdown || buildPromptMarkdown(optimizedDraft))"></div>
-          <div class="btn-row" style="margin-top:12px">
+          <div class="btn-row" style="margin-top:12px" v-if="canWrite">
             <button class="secondary" :disabled="optimizerLoading" @click="reoptimizePrompt">Reoptimize</button>
             <button @click="applyOptimizedPrompt">Update Prompt</button>
           </div>

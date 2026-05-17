@@ -2,7 +2,7 @@ def test_get_and_update_optimize_config(client):  # type: ignore[no-untyped-def]
     get_response = client.get("/optimize/config")
     assert get_response.status_code == 200
     cfg = get_response.json()
-    assert cfg["effective_gp_profile"] in {"fast", "quality"}
+    assert cfg["effective_gp_profile"] in {"fast", "quality", "ultra"}
     assert cfg["effective_llm_provider"] == "ollama"
 
     put_response = client.put(
