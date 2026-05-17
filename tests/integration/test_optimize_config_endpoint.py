@@ -82,6 +82,14 @@ def test_clear_model_id_with_extra_fields(client):  # type: ignore[no-untyped-de
     assert cfg["effective_gp_profile"] == "quality"
 
 
+def test_update_config_accepts_ultra_gp_profile(client):  # type: ignore[no-untyped-def]
+    response = client.put("/optimize/config", json={"gp_profile": "ultra"})
+    assert response.status_code == 200
+    cfg = response.json()
+    assert cfg["runtime_gp_profile"] == "ultra"
+    assert cfg["effective_gp_profile"] == "ultra"
+
+
 def test_update_config_invalid_gp_profile_falls_back_to_fast(client):  # type: ignore[no-untyped-def]
     """Unknown profile names are normalised to 'fast' by the service layer."""
     response = client.put("/optimize/config", json={"gp_profile": "turbo"})
@@ -177,12 +185,12 @@ def test_get_provider_models_openai_mocked_with_token(client):  # type: ignore[n
     assert response.status_code == 200
     models = response.json()
     assert "gpt-4o" in models
-    mock_list.assert_called_once_with(
-        "openai",
-        base_url=None,
-        timeout_seconds=5,
-        api_token="test-token",
-    )
+    called_args, called_kwargs = mock_list.call_args
+    assert called_args == ("openai",)
+    assert called_kwargs["base_url"] is None
+    assert called_kwargs["timeout_seconds"] == 5
+    assert called_kwargs["api_token"] == "test-token"
+    assert "config_override" in called_kwargs
 
 
 def test_get_provider_models_case_insensitive_provider(client):  # type: ignore[no-untyped-def]

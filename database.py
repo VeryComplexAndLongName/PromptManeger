@@ -1,6 +1,9 @@
 import os
+from pathlib import Path
 from typing import Any
 
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -47,3 +50,24 @@ if is_sqlite:
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
+
+
+def _run_alembic_upgrade() -> None:
+    project_root = Path(__file__).resolve().parent
+    alembic_ini_path = project_root / "alembic.ini"
+    if not alembic_ini_path.exists():
+        return
+
+    alembic_config = Config(str(alembic_ini_path))
+    alembic_config.set_main_option("script_location", str(project_root / "alembic"))
+    alembic_config.set_main_option("sqlalchemy.url", SQLALCHEMY_DATABASE_URL)
+    command.upgrade(alembic_config, "head")
+
+
+def init_database(bind=None) -> None:  # type: ignore[no-untyped-def]
+    if bind is not None:
+        Base.metadata.create_all(bind=bind)
+        return
+
+    _run_alembic_upgrade()
+    Base.metadata.create_all(bind=engine)

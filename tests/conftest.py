@@ -8,6 +8,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+import auth_service
+import main
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -48,9 +51,27 @@ def client(db_session: Session) -> Iterator[TestClient]:
     def override_get_db() -> Iterator[Session]:
         yield db_session
 
+    startup_session_factory = sessionmaker(autocommit=False, autoflush=False, bind=db_session.get_bind())
+    original_session_local = main.SessionLocal
+    original_init_database = main.init_database
+
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[auth_service.get_db_session] = override_get_db
+    main.SessionLocal = startup_session_factory
+    main.init_database = lambda bind=None: Base.metadata.create_all(bind=db_session.get_bind())
     with TestClient(app) as test_client:
+        login_response = test_client.post(
+            "/auth/login",
+            json={"username": "admin", "password": "admin"},
+        )
+        if login_response.status_code != 200:
+            raise AssertionError(f"Login failed: {login_response.status_code} {login_response.text}")
+
+        token = login_response.json()["access_token"]
+        test_client.headers.update({"Authorization": f"Bearer {token}"})
         yield test_client
+    main.SessionLocal = original_session_local
+    main.init_database = original_init_database
     app.dependency_overrides.clear()
 
 

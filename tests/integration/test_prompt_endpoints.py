@@ -1,3 +1,6 @@
+import pytest
+
+
 def test_prompt_crud_search_and_versions(client, sample_prompt_payload):  # type: ignore[no-untyped-def]
     create_response = client.post("/prompts", json=sample_prompt_payload)
     assert create_response.status_code == 200
@@ -133,6 +136,19 @@ def test_create_prompt_missing_name_returns_422(client):  # type: ignore[no-unty
 
 def test_create_prompt_missing_project_returns_422(client):  # type: ignore[no-untyped-def]
     response = client.post("/prompts", json={"name": "some-prompt", "task": "Do something"})
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [("name", ""), ("name", "   "), ("project", ""), ("project", "   ")],
+)
+def test_create_prompt_blank_name_or_project_returns_422(client, field_name, field_value):  # type: ignore[no-untyped-def]
+    payload = {"name": "some-prompt", "project": "test", "task": "Do something"}
+    payload[field_name] = field_value
+
+    response = client.post("/prompts", json=payload)
+
     assert response.status_code == 422
 
 
