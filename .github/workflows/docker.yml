@@ -22,7 +22,9 @@ jobs:
       id: version
       shell: bash
       run: |
-        python -c "import os, tomllib; from pathlib import Path; data = tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8')); project = data['project']; name = str(project['name']).strip(); version = str(project['version']).strip(); description = str(project.get('description', '')).replace('\n', ' ').strip(); fp = open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8'); fp.write(f'name={name}\nimage_name={name}\nversion={version}\ntag=v{version}\ndescription={description}\n'); fp.close()"
+        python -c "import os, tomllib; from pathlib import Path; data = tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8')); project = data['project']; name = str(project['name']).strip(); version = str(project['version']).strip(); description = str(project.get('description', '')).replace('\n', ' ').strip(); ghcr_owner = os.environ['GITHUB_REPOSITORY_OWNER'].strip().lower(); dockerhub_namespace = os.environ.get('DOCKERHUB_USERNAME', '').strip().lower(); fp = open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8'); fp.write(f'name={name}\nimage_name={name.lower()}\nversion={version}\ntag=v{version}\ndescription={description}\nghcr_owner={ghcr_owner}\ndockerhub_namespace={dockerhub_namespace}\n'); fp.close()"
+      env:
+        DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
 
     - name: Create git tag from pyproject version
       shell: bash
@@ -62,9 +64,9 @@ jobs:
           org.opencontainers.image.revision=${{ github.sha }}
           org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
         tags: |
-          ghcr.io/${{ github.repository_owner }}/${{ steps.version.outputs.image_name }}:latest
-          ghcr.io/${{ github.repository_owner }}/${{ steps.version.outputs.image_name }}:${{ steps.version.outputs.version }}
-          ghcr.io/${{ github.repository_owner }}/${{ steps.version.outputs.image_name }}:${{ steps.version.outputs.tag }}
-          ${{ secrets.DOCKERHUB_USERNAME }}/${{ steps.version.outputs.image_name }}:latest
-          ${{ secrets.DOCKERHUB_USERNAME }}/${{ steps.version.outputs.image_name }}:${{ steps.version.outputs.version }}
-          ${{ secrets.DOCKERHUB_USERNAME }}/${{ steps.version.outputs.image_name }}:${{ steps.version.outputs.tag }}
+          ghcr.io/${{ steps.version.outputs.ghcr_owner }}/${{ steps.version.outputs.image_name }}:latest
+          ghcr.io/${{ steps.version.outputs.ghcr_owner }}/${{ steps.version.outputs.image_name }}:${{ steps.version.outputs.version }}
+          ghcr.io/${{ steps.version.outputs.ghcr_owner }}/${{ steps.version.outputs.image_name }}:${{ steps.version.outputs.tag }}
+          ${{ steps.version.outputs.dockerhub_namespace }}/${{ steps.version.outputs.image_name }}:latest
+          ${{ steps.version.outputs.dockerhub_namespace }}/${{ steps.version.outputs.image_name }}:${{ steps.version.outputs.version }}
+          ${{ steps.version.outputs.dockerhub_namespace }}/${{ steps.version.outputs.image_name }}:${{ steps.version.outputs.tag }}
