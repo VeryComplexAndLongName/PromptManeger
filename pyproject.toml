@@ -1,7 +1,7 @@
 [project]
-name = "prompt-manager"
+name = "prompt-man"
 version = "0.1.0"
-description = "Local FastAPI service for storing, versioning, and tagging LLM prompts"
+description = "Prompt Man: FastAPI + Vue app for storing, versioning, and optimizing prompts"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.111.0",
@@ -11,6 +11,7 @@ dependencies = [
     "requests>=2.33.1",
     "greaterprompt>=0.2.0",
     "loguru>=0.7.2",
+    "cryptography>=48.0.0"
 ]
 
 [project.optional-dependencies]

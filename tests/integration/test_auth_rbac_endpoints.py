@@ -14,6 +14,17 @@ def login_bundle(client: TestClient, username: str, password: str) -> dict:
     return response.json()
 
 
+def test_version_endpoint_exposes_semver_string(client):  # type: ignore[no-untyped-def]
+    response = client.get("/version")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["name"] == "prompt-man"
+    version = payload["version"]
+    parts = version.split(".")
+    assert len(parts) == 3
+    assert all(part.isdigit() for part in parts)
+
+
 def test_auth_status_reports_existing_default_admin(client):  # type: ignore[no-untyped-def]
     response = client.get("/auth/status")
     assert response.status_code == 200

@@ -1,6 +1,6 @@
 # Prompt Man
 
-Local FastAPI + Vue application for storing, versioning, tagging, securing, and optimizing prompt templates.
+Prompt Man: FastAPI + Vue app for storing, versioning, and optimizing prompts.
 
 ![Main Program Purpose](screen2.png)
 
@@ -31,9 +31,45 @@ Local FastAPI + Vue application for storing, versioning, tagging, securing, and 
 - Admin UI for project CRUD, user CRUD, and project access assignment.
 - Normalized database schema with dedicated `projects` and `roles` tables.
 - Prompt audit metadata: created/updated timestamps plus the user who made the change.
+- Semantic Versioning (SemVer) with runtime version endpoint (`GET /version`).
 - Sensitive config values encrypted at rest.
 - Automatic database migration on startup.
 - Default bootstrap admin support for first run.
+
+## Versioning (SemVer)
+
+This project uses Semantic Versioning: `MAJOR.MINOR.PATCH`.
+
+- `PATCH`
+  - backward-compatible bugfixes and internal fixes
+- `MINOR`
+  - backward-compatible new features or endpoints
+- `MAJOR`
+  - any backward-incompatible API/behavior change
+
+Current application version is defined in [pyproject.toml](pyproject.toml) under `project.version`.
+At runtime the app exposes version info via:
+
+```text
+GET /version
+```
+
+Example response:
+
+```json
+{
+  "name": "prompt-man",
+  "version": "0.1.0"
+}
+```
+
+### Release Bump Checklist
+
+1. Decide bump type (`PATCH` / `MINOR` / `MAJOR`).
+2. Update `project.version` in [pyproject.toml](pyproject.toml).
+3. Run tests.
+4. Commit with release note (for example: `chore(release): 0.2.0`).
+5. Create git tag matching version (for example: `v0.2.0`).
 
 ## Requirements
 

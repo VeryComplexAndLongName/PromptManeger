@@ -1,8 +1,11 @@
 import datetime
+import importlib.metadata
 import logging
 import os
 import sys
+import tomllib
 from collections.abc import Iterator
+from pathlib import Path
 from time import perf_counter
 from typing import Literal
 
@@ -49,7 +52,31 @@ from schemas import (
     UserUpdate,
 )
 
-app = FastAPI(title="Local Prompt Man")
+
+def _resolve_app_version() -> str:
+    try:
+        return importlib.metadata.version("prompt-man")
+    except importlib.metadata.PackageNotFoundError:
+        pass
+
+    pyproject_path = Path(__file__).resolve().parent / "pyproject.toml"
+    if pyproject_path.exists():
+        try:
+            with pyproject_path.open("rb") as fp:
+                pyproject = tomllib.load(fp)
+            version = pyproject.get("project", {}).get("version")
+            if isinstance(version, str) and version.strip():
+                return version.strip()
+        except Exception:
+            pass
+
+    return "0.0.0"
+
+
+APP_VERSION = _resolve_app_version()
+
+
+app = FastAPI(title="Prompt Man", version=APP_VERSION)
 app.mount("/ui", StaticFiles(directory="ui"), name="ui")
 
 CONSOLE_LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
@@ -302,6 +329,11 @@ def refresh_auth(data: RefreshTokenRequest, db: Session = Depends(get_db)) -> Au
 def get_auth_status(db: Session = Depends(get_db)) -> AuthStatus:
     has_users = bool(crud.list_users(db))
     return AuthStatus(bootstrap_required=not has_users, has_users=has_users)
+
+
+@app.get("/version")
+def get_version() -> dict[str, str]:
+    return {"name": "prompt-man", "version": APP_VERSION}
 
 
 @app.get("/auth/me", response_model=UserOut)
