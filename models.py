@@ -1,4 +1,4 @@
-from sqlalchemy import Column, ForeignKey, Integer, String, Table, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, Column, ForeignKey, Integer, String, Table, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, relationship
 
 from database import Base
@@ -10,16 +10,109 @@ prompt_tags = Table(
     Column("tag_id", ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True),
 )
 
-class Prompt(Base):
-    __tablename__ = "prompts"
-    __table_args__ = (UniqueConstraint("name", "project", name="uq_prompt_name_project"),)
+class Project(Base):
+    __tablename__ = "projects"
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_projects_name"),
+        CheckConstraint("trim(name) <> ''", name="ck_projects_name_not_blank"),
+    )
 
     id: Mapped[int] = Column(Integer, primary_key=True, index=True)  # type: ignore[assignment]
-    name: Mapped[str] = Column(String, index=True)  # type: ignore[assignment]
-    project: Mapped[str] = Column(String, index=True)  # type: ignore[assignment]
+    name: Mapped[str] = Column(String, nullable=False, index=True)  # type: ignore[assignment]
 
+    prompts: Mapped[list["Prompt"]] = relationship("Prompt", back_populates="project_ref", cascade="all, delete-orphan")
+    project_access: Mapped[list["ProjectAccess"]] = relationship("ProjectAccess", back_populates="project_ref", cascade="all, delete-orphan")
+
+
+class Role(Base):
+    __tablename__ = "roles"
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_roles_name"),
+        CheckConstraint("trim(name) <> ''", name="ck_roles_name_not_blank"),
+    )
+
+    id: Mapped[int] = Column(Integer, primary_key=True, index=True)  # type: ignore[assignment]
+    name: Mapped[str] = Column(String, nullable=False, index=True)  # type: ignore[assignment]
+
+    users: Mapped[list["User"]] = relationship("User", back_populates="role_ref")
+
+
+class Prompt(Base):
+    __tablename__ = "prompts"
+    __table_args__ = (
+        UniqueConstraint("name", "project_id", name="uq_prompt_name_project_id"),
+        CheckConstraint("trim(name) <> ''", name="ck_prompts_name_not_blank"),
+    )
+
+    id: Mapped[int] = Column(Integer, primary_key=True, index=True)  # type: ignore[assignment]
+    name: Mapped[str] = Column(String, index=True, nullable=False)  # type: ignore[assignment]
+    project_id: Mapped[int] = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False)  # type: ignore[assignment]
+
+    project_ref: Mapped["Project"] = relationship("Project", back_populates="prompts")
     versions: Mapped[list["PromptVersion"]] = relationship("PromptVersion", back_populates="prompt", cascade="all, delete-orphan")
     tags: Mapped[list["Tag"]] = relationship("Tag", secondary=prompt_tags, back_populates="prompts")
+
+    @property
+    def project(self) -> str:
+        return self.project_ref.name
+
+
+class User(Base):
+    __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("username", name="uq_users_username"),
+        CheckConstraint("trim(username) <> ''", name="ck_users_username_not_blank"),
+    )
+
+    id: Mapped[int] = Column(Integer, primary_key=True, index=True)  # type: ignore[assignment]
+    username: Mapped[str] = Column(String, nullable=False, index=True)  # type: ignore[assignment]
+    password_hash_encrypted: Mapped[str] = Column(Text, nullable=False)  # type: ignore[assignment]
+    role_id: Mapped[int] = Column(Integer, ForeignKey("roles.id", ondelete="RESTRICT"), nullable=False, index=True)  # type: ignore[assignment]
+    is_active: Mapped[bool] = Column(Boolean, nullable=False, default=True)  # type: ignore[assignment]
+
+    role_ref: Mapped["Role"] = relationship("Role", back_populates="users")
+    config: Mapped["Config | None"] = relationship("Config", back_populates="user", cascade="all, delete-orphan", uselist=False)
+    project_access: Mapped[list["ProjectAccess"]] = relationship("ProjectAccess", back_populates="user", cascade="all, delete-orphan")
+
+    @property
+    def role(self) -> str:
+        return self.role_ref.name
+
+
+class ProjectAccess(Base):
+    __tablename__ = "project_access"
+    __table_args__ = (
+        UniqueConstraint("user_id", "project_id", name="uq_project_access_user_project_id"),
+    )
+
+    id: Mapped[int] = Column(Integer, primary_key=True, index=True)  # type: ignore[assignment]
+    user_id: Mapped[int] = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)  # type: ignore[assignment]
+    project_id: Mapped[int] = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)  # type: ignore[assignment]
+
+    user: Mapped["User"] = relationship("User", back_populates="project_access")
+    project_ref: Mapped["Project"] = relationship("Project", back_populates="project_access")
+
+    @property
+    def project(self) -> str:
+        return self.project_ref.name
+
+
+class Config(Base):
+    __tablename__ = "configs"
+    __table_args__ = (UniqueConstraint("user_id", name="uq_configs_user_id"),)
+
+    id: Mapped[int] = Column(Integer, primary_key=True, index=True)  # type: ignore[assignment]
+    user_id: Mapped[int] = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)  # type: ignore[assignment]
+    model_id: Mapped[str | None] = Column(String, nullable=True)  # type: ignore[assignment]
+    rounds: Mapped[int | None] = Column(Integer, nullable=True)  # type: ignore[assignment]
+    gp_profile: Mapped[str | None] = Column(String, nullable=True)  # type: ignore[assignment]
+    llm_provider: Mapped[str | None] = Column(String, nullable=True)  # type: ignore[assignment]
+    llm_model: Mapped[str | None] = Column(String, nullable=True)  # type: ignore[assignment]
+    llm_base_url: Mapped[str | None] = Column(String, nullable=True)  # type: ignore[assignment]
+    llm_timeout_seconds: Mapped[int | None] = Column(Integer, nullable=True)  # type: ignore[assignment]
+    llm_api_token_encrypted: Mapped[str | None] = Column(Text, nullable=True)  # type: ignore[assignment]
+
+    user: Mapped["User"] = relationship("User", back_populates="config")
 
 
 class Tag(Base):

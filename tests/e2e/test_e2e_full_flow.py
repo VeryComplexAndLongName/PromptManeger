@@ -2,7 +2,7 @@ from optimizer_service import OptimizationResult
 
 
 def test_end_to_end_all_endpoints(client, sample_prompt_payload, monkeypatch):  # type: ignore[no-untyped-def]
-    def fake_greaterprompt(fields):  # type: ignore[no-untyped-def]
+    def fake_greaterprompt(fields, config_override=None):  # type: ignore[no-untyped-def]
         optimized = {
             "role": fields.get("role"),
             "task": f"{fields.get('task', '').strip()} (optimized by GP)",
@@ -18,7 +18,7 @@ def test_end_to_end_all_endpoints(client, sample_prompt_payload, monkeypatch):  
             notes=["e2e-gp"],
         )
 
-    def fake_llm(fields):  # type: ignore[no-untyped-def]
+    def fake_llm(fields, config_override=None):  # type: ignore[no-untyped-def]
         optimized = {
             "role": fields.get("role"),
             "task": f"{fields.get('task', '').strip()} (optimized by LLM)",

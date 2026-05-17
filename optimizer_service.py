@@ -2,8 +2,10 @@ import base64
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass
 from threading import Lock
+from time import perf_counter
 from typing import Any
 
 import requests
@@ -46,7 +48,7 @@ def _decrypt_token(encrypted_token: str | None) -> str | None:
         logger.warning(f"Token decryption failed: {e}")
         return None
 
-_ALLOWED_GP_PROFILES = {"fast", "quality"}
+_ALLOWED_GP_PROFILES = {"fast", "quality", "ultra"}
 _GREATERPROMPT_PROFILE_CONFIGS: dict[str, dict[str, Any]] = {
     "fast": {
         "generate_config": {
@@ -73,6 +75,20 @@ _GREATERPROMPT_PROFILE_CONFIGS: dict[str, dict[str, Any]] = {
         },
         "candidates_topk": 8,
         "intersect_q": 2,
+        "filter": True,
+        "p_extractor": "Answer:",
+    },
+    "ultra": {
+        "generate_config": {
+            "max_new_tokens": 320,
+            "temperature": 0.4,
+            "top_p": 0.92,
+            "repetition_penalty": 1.15,
+            "no_repeat_ngram_size": 4,
+            "do_sample": True,
+        },
+        "candidates_topk": 12,
+        "intersect_q": 3,
         "filter": True,
         "p_extractor": "Answer:",
     },
@@ -103,67 +119,22 @@ def _get_gp_optimize_config(profile: str) -> dict[str, Any]:
     return result if isinstance(result, dict) else {}
 
 
-def set_runtime_optimizer_config(
-    model_id: str | None = None,
-    rounds: int | None = None,
-    gp_profile: str | None = None,
-    llm_provider: str | None = None,
-    llm_model: str | None = None,
-    llm_base_url: str | None = None,
-    llm_timeout_seconds: int | None = None,
-    llm_api_token: str | None = None,
-) -> dict[str, Any]:
-    with _runtime_config_lock:
-        if model_id is not None:
-            normalized_model = model_id.strip()
-            _runtime_optimize_config["model_id"] = normalized_model or None
-        if rounds is not None:
-            _runtime_optimize_config["rounds"] = max(1, int(rounds))
-        if gp_profile is not None:
-            _runtime_optimize_config["gp_profile"] = _normalize_gp_profile(gp_profile)
-        if llm_provider is not None:
-            _runtime_optimize_config["llm_provider"] = llm_provider.strip().lower() or "ollama"
-        if llm_model is not None:
-            _runtime_optimize_config["llm_model"] = llm_model.strip() or "qwen2.5:0.5b"
-        if llm_base_url is not None:
-            _runtime_optimize_config["llm_base_url"] = llm_base_url.strip() or "http://127.0.0.1:11434"
-        if llm_timeout_seconds is not None:
-            _runtime_optimize_config["llm_timeout_seconds"] = max(5, int(llm_timeout_seconds))
-        if llm_api_token is not None:
-            # Encrypt and store token
-            encrypted = _encrypt_token(llm_api_token)
-            _runtime_optimize_config["llm_api_token_encrypted"] = encrypted
-    logger.info(
-        "optimize.config.runtime_set model_id={} rounds={} gp_profile={} llm_provider={} llm_model={} llm_base_url={} llm_timeout_seconds={} has_api_token={}",
-        model_id,
-        rounds,
-        gp_profile,
-        llm_provider,
-        llm_model,
-        llm_base_url,
-        llm_timeout_seconds,
-        llm_api_token is not None and len(llm_api_token.strip()) > 0,
-    )
-    return get_runtime_optimizer_config()
+def build_optimizer_config(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    if overrides is None:
+        with _runtime_config_lock:
+            source = dict(_runtime_optimize_config)
+    else:
+        source = overrides
 
-
-def clear_runtime_model_id() -> dict[str, Any]:
-    with _runtime_config_lock:
-        _runtime_optimize_config["model_id"] = None
-    logger.info("optimize.config.runtime_clear_model_id")
-    return get_runtime_optimizer_config()
-
-
-def get_runtime_optimizer_config() -> dict[str, Any]:
-    with _runtime_config_lock:
-        runtime_model_id = _runtime_optimize_config["model_id"]
-        runtime_rounds = _runtime_optimize_config["rounds"]
-        runtime_gp_profile = _runtime_optimize_config["gp_profile"]
-        runtime_llm_provider = _runtime_optimize_config["llm_provider"]
-        runtime_llm_model = _runtime_optimize_config["llm_model"]
-        runtime_llm_base_url = _runtime_optimize_config["llm_base_url"]
-        runtime_llm_timeout_seconds = _runtime_optimize_config["llm_timeout_seconds"]
-        runtime_llm_api_token_encrypted = _runtime_optimize_config.get("llm_api_token_encrypted")
+    runtime_model_id = source.get("model_id", source.get("runtime_model_id"))
+    runtime_rounds = source.get("rounds", source.get("runtime_rounds"))
+    runtime_gp_profile = source.get("gp_profile", source.get("runtime_gp_profile"))
+    runtime_llm_provider = source.get("llm_provider", source.get("runtime_llm_provider"))
+    runtime_llm_model = source.get("llm_model", source.get("runtime_llm_model"))
+    runtime_llm_base_url = source.get("llm_base_url", source.get("runtime_llm_base_url"))
+    runtime_llm_timeout_seconds = source.get("llm_timeout_seconds", source.get("runtime_llm_timeout_seconds"))
+    runtime_llm_api_token = source.get("llm_api_token", source.get("effective_llm_api_token"))
+    runtime_llm_api_token_encrypted = source.get("llm_api_token_encrypted")
 
     env_model_id = os.getenv("GREATERPROMPT_MODEL_ID", "").strip() or None
     env_rounds_raw = os.getenv("GREATERPROMPT_ROUNDS", "").strip()
@@ -178,15 +149,15 @@ def get_runtime_optimizer_config() -> dict[str, Any]:
     env_llm_timeout_seconds = int(env_llm_timeout_raw) if env_llm_timeout_raw.isdigit() else None
 
     effective_model_id = runtime_model_id if runtime_model_id is not None else env_model_id
-    effective_rounds = runtime_rounds if runtime_rounds is not None else (env_rounds or 2)
+    effective_rounds = int(runtime_rounds) if runtime_rounds is not None else (env_rounds or 2)
     effective_gp_profile = _normalize_gp_profile(runtime_gp_profile or env_gp_profile or "fast")
     effective_gp_optimize_config = _get_gp_optimize_config(effective_gp_profile)
-    effective_llm_provider = runtime_llm_provider or env_llm_provider or "ollama"
-    effective_llm_model = runtime_llm_model or env_llm_model or "qwen2.5:0.5b"
-    effective_llm_base_url = runtime_llm_base_url or env_llm_base_url or "http://127.0.0.1:11434"
-    effective_llm_timeout_seconds = runtime_llm_timeout_seconds or env_llm_timeout_seconds or 300
+    effective_llm_provider = (runtime_llm_provider or env_llm_provider or "ollama").strip().lower()
+    effective_llm_model = (runtime_llm_model or env_llm_model or "qwen2.5:0.5b").strip()
+    effective_llm_base_url = (runtime_llm_base_url or env_llm_base_url or "http://127.0.0.1:11434").strip()
+    effective_llm_timeout_seconds = int(runtime_llm_timeout_seconds or env_llm_timeout_seconds or 300)
     # Decrypt token for use (never return plaintext in response)
-    effective_llm_api_token = _decrypt_token(runtime_llm_api_token_encrypted or env_llm_api_token_encrypted)
+    effective_llm_api_token = runtime_llm_api_token or _decrypt_token(runtime_llm_api_token_encrypted or env_llm_api_token_encrypted)
 
     return {
         "runtime_model_id": runtime_model_id,
@@ -217,6 +188,60 @@ def get_runtime_optimizer_config() -> dict[str, Any]:
         "effective_llm_api_token": effective_llm_api_token,  # Internal use only, NOT sent to frontend
         "gradient_enabled": bool(effective_model_id),
     }
+
+
+def set_runtime_optimizer_config(
+    model_id: str | None = None,
+    rounds: int | None = None,
+    gp_profile: str | None = None,
+    llm_provider: str | None = None,
+    llm_model: str | None = None,
+    llm_base_url: str | None = None,
+    llm_timeout_seconds: int | None = None,
+    llm_api_token: str | None = None,
+) -> dict[str, Any]:
+    with _runtime_config_lock:
+        if model_id is not None:
+            normalized_model = model_id.strip()
+            _runtime_optimize_config["model_id"] = normalized_model or None
+        if rounds is not None:
+            _runtime_optimize_config["rounds"] = max(1, int(rounds))
+        if gp_profile is not None:
+            _runtime_optimize_config["gp_profile"] = _normalize_gp_profile(gp_profile)
+        if llm_provider is not None:
+            _runtime_optimize_config["llm_provider"] = llm_provider.strip().lower() or "ollama"
+        if llm_model is not None:
+            _runtime_optimize_config["llm_model"] = llm_model.strip() or "qwen2.5:0.5b"
+        if llm_base_url is not None:
+            _runtime_optimize_config["llm_base_url"] = llm_base_url.strip() or "http://127.0.0.1:11434"
+        if llm_timeout_seconds is not None:
+            _runtime_optimize_config["llm_timeout_seconds"] = max(5, int(llm_timeout_seconds))
+        if llm_api_token is not None:
+            _runtime_optimize_config["llm_api_token_encrypted"] = _encrypt_token(llm_api_token)
+    logger.info(
+        "optimize.config.runtime_set model_id={} rounds={} gp_profile={} llm_provider={} llm_model={} llm_base_url={} llm_timeout_seconds={} has_api_token={}",
+        model_id,
+        rounds,
+        gp_profile,
+        llm_provider,
+        llm_model,
+        llm_base_url,
+        llm_timeout_seconds,
+        llm_api_token is not None and len(llm_api_token.strip()) > 0,
+    )
+    return get_runtime_optimizer_config()
+
+
+def clear_runtime_model_id() -> dict[str, Any]:
+    with _runtime_config_lock:
+        _runtime_optimize_config["model_id"] = None
+    logger.info("optimize.config.runtime_clear_model_id")
+    return get_runtime_optimizer_config()
+
+
+def get_runtime_optimizer_config() -> dict[str, Any]:
+    with _runtime_config_lock:
+        return build_optimizer_config(dict(_runtime_optimize_config))
 
 
 def _normalize_text(value: Any) -> str | None:
@@ -282,8 +307,8 @@ class OptimizationResult:
     notes: list[str]
 
 
-def _try_gradient_optimization(fields: dict[str, str | None]) -> OptimizationResult | None:
-    runtime = get_runtime_optimizer_config()
+def _try_gradient_optimization(fields: dict[str, str | None], config_override: dict[str, Any] | None = None) -> OptimizationResult | None:
+    runtime = build_optimizer_config(config_override)
     model_id = runtime["effective_model_id"] or ""
     gp_profile = runtime["effective_gp_profile"]
     gp_optimize_config = dict(runtime["effective_gp_optimize_config"])
@@ -354,8 +379,18 @@ def _try_gradient_optimization(fields: dict[str, str | None]) -> OptimizationRes
         return None
 
 
-def optimize_with_greaterprompt(fields: dict[str, str | None]) -> OptimizationResult:
-    logger.info("optimize.greaterprompt.service_start")
+def optimize_with_greaterprompt(fields: dict[str, str | None], config_override: dict[str, Any] | None = None) -> OptimizationResult:
+    runtime = build_optimizer_config(config_override)
+    active_model_id = runtime["effective_model_id"] or None
+    gp_profile = runtime["effective_gp_profile"]
+    rounds = int(runtime["effective_rounds"])
+    logger.info(
+        "optimize.greaterprompt.service_start model_id={} profile={} rounds={} gradient_enabled={}",
+        active_model_id,
+        gp_profile,
+        rounds,
+        bool(active_model_id),
+    )
     sanitized = {
         "role": _normalize_text(fields.get("role")),
         "task": _normalize_text(fields.get("task")) or "",
@@ -365,9 +400,20 @@ def optimize_with_greaterprompt(fields: dict[str, str | None]) -> OptimizationRe
         "examples": _normalize_text(fields.get("examples")),
     }
 
-    gradient_result = _try_gradient_optimization(sanitized)
+    gradient_result = _try_gradient_optimization(sanitized, config_override)
     if gradient_result is not None:
-        logger.info("optimize.greaterprompt.service_done engine=greaterprompt-gradient")
+        gradient_result.notes = [
+            f"GreaterPrompt model: {active_model_id}",
+            f"GreaterPrompt profile: {gp_profile} | Rounds: {rounds}",
+            *gradient_result.notes,
+        ]
+        logger.info(
+            "optimize.greaterprompt.service_done engine={} model_id={} profile={} rounds={}",
+            gradient_result.engine,
+            active_model_id,
+            gp_profile,
+            rounds,
+        )
         return gradient_result
 
     # Lightweight mode still relies on GreaterPrompt utilities while avoiding heavyweight model loading.
@@ -390,10 +436,26 @@ def optimize_with_greaterprompt(fields: dict[str, str | None]) -> OptimizationRe
     scored = clean_string([(_build_full_prompt(improved), 0.0)])
     best_prompt = scored[0][0] if scored else _build_full_prompt(improved)
 
-    notes = [
-        "Optimization used GreaterPrompt in lightweight mode.",
-        "Set GREATERPROMPT_MODEL_ID (or runtime optimize config) to enable full gradient optimization.",
-    ]
+    if active_model_id:
+        notes = [
+            f"GreaterPrompt model configured: {active_model_id}",
+            f"GreaterPrompt profile: {gp_profile} | Rounds: {rounds}",
+            "GreaterPrompt ran in lightweight mode because gradient optimization was unavailable or failed.",
+        ]
+    else:
+        notes = [
+            "GreaterPrompt model: none (lightweight mode)",
+            f"GreaterPrompt profile: {gp_profile} | Rounds: {rounds}",
+            "Set GREATERPROMPT_MODEL_ID (or runtime optimize config) to enable full gradient optimization.",
+        ]
+
+    logger.info(
+        "optimize.greaterprompt.lightweight model_id={} profile={} rounds={} configured_model={}",
+        active_model_id,
+        gp_profile,
+        rounds,
+        bool(active_model_id),
+    )
 
     return OptimizationResult(
         engine="greaterprompt-light",
@@ -414,11 +476,96 @@ def _to_prompt_fields(raw: dict[str, Any], fallback: dict[str, str | None]) -> d
     }
 
 
+def _escape_json_newlines(value: str) -> str:
+    result: list[str] = []
+    in_string = False
+    escape = False
+
+    for char in value:
+        if char == '"' and not escape:
+            in_string = not in_string
+        if in_string and char in "\r\n":
+            result.append("\\n")
+            escape = False
+            continue
+        result.append(char)
+        if char == "\\" and not escape:
+            escape = True
+        else:
+            escape = False
+
+    if in_string:
+        result.append('"')
+
+    return "".join(result)
+
+
+def _balance_json_delimiters(value: str) -> str:
+    balanced = value
+    open_braces = balanced.count("{")
+    close_braces = balanced.count("}")
+    if open_braces > close_braces:
+        balanced += "}" * (open_braces - close_braces)
+
+    open_brackets = balanced.count("[")
+    close_brackets = balanced.count("]")
+    if open_brackets > close_brackets:
+        balanced += "]" * (open_brackets - close_brackets)
+
+    return balanced
+
+
+def _extract_known_json_fields(value: str) -> dict[str, Any]:
+    extracted: dict[str, Any] = {}
+    for key in ("role", "task", "context", "constraints", "output_format", "examples"):
+        match = re.search(rf'"{re.escape(key)}"\s*:\s*"((?:\\.|[^"\\])*)"', value, re.DOTALL)
+        if not match:
+            continue
+        try:
+            extracted[key] = json.loads(f'"{match.group(1)}"')
+        except json.JSONDecodeError:
+            extracted[key] = match.group(1).replace("\\n", "\n")
+    return extracted
+
+
+def _parse_ollama_json_response(raw_response: Any) -> dict[str, Any]:
+    if isinstance(raw_response, dict):
+        return raw_response
+
+    if not isinstance(raw_response, str):
+        return {}
+
+    candidate = raw_response.strip()
+    if not candidate:
+        return {}
+
+    try:
+        parsed = json.loads(candidate)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError as exc:
+        logger.warning("optimize.llm.ollama.invalid_json error={} preview={!r}", exc, candidate[:400])
+
+    start = candidate.find("{")
+    end = candidate.rfind("}")
+    if start != -1:
+        candidate = candidate[start:] if end == -1 or end < start else candidate[start : end + 1]
+
+    repaired = _balance_json_delimiters(_escape_json_newlines(candidate))
+    try:
+        parsed = json.loads(repaired)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError as exc:
+        logger.warning("optimize.llm.ollama.repair_failed error={} preview={!r}", exc, repaired[:400])
+
+    return _extract_known_json_fields(repaired)
+
+
 def _optimize_with_ollama(fields: dict[str, str | None], cfg: dict[str, Any]) -> OptimizationResult:
     model = cfg["effective_llm_model"]
     base_url = cfg["effective_llm_base_url"].rstrip("/")
     timeout_seconds = int(cfg.get("effective_llm_timeout_seconds", 300))
     logger.info("optimize.llm.ollama.start model={} base_url={} timeout_seconds={}", model, base_url, timeout_seconds)
+    started_at = perf_counter()
 
     system_prompt = (
         "You optimize prompts. Rewrite provided prompt fields to be clearer and more actionable. "
@@ -441,31 +588,44 @@ def _optimize_with_ollama(fields: dict[str, str | None], cfg: dict[str, Any]) ->
         "stream": False,
         "format": "json",
         "prompt": f"System: {system_prompt}\n\nUser: {user_prompt}",
-        "options": {"temperature": 0.2},
+        "options": {
+            "temperature": 0.2,
+            # Keep response bounded and deterministic enough for prompt rewrite output.
+            "num_predict": 512,
+        },
+        # Keep model warm for follow-up requests to reduce cold-start latency.
+        "keep_alive": "10m",
     }
 
-    resp = requests.post(f"{base_url}/api/generate", json=payload, timeout=timeout_seconds)
+    resp = requests.post(
+        f"{base_url}/api/generate",
+        json=payload,
+        timeout=(10, timeout_seconds),
+    )
     resp.raise_for_status()
 
     body = resp.json()
     raw_response = body.get("response", "{}")
-    parsed = json.loads(raw_response)
-    if not isinstance(parsed, dict):
-        parsed = {}
+    parsed = _parse_ollama_json_response(raw_response)
 
     improved = _to_prompt_fields(parsed, fields)
     improved = _heuristic_improve(improved)
+    elapsed = perf_counter() - started_at
+    logger.info("optimize.llm.ollama.done model={} elapsed_s={:.2f}", model, elapsed)
 
     return OptimizationResult(
         engine=f"llm-ollama:{model}",
         optimized_fields=improved,
         optimized_markdown=_build_full_prompt(improved),
-        notes=["Optimized with Ollama LLM."],
+        notes=[
+            "Optimized with Ollama LLM.",
+            f"Provider call duration: {elapsed:.2f}s",
+        ],
     )
 
 
-def optimize_with_llm(fields: dict[str, str | None]) -> OptimizationResult:
-    cfg = get_runtime_optimizer_config()
+def optimize_with_llm(fields: dict[str, str | None], config_override: dict[str, Any] | None = None) -> OptimizationResult:
+    cfg = build_optimizer_config(config_override)
     provider = cfg["effective_llm_provider"]
     logger.info(
         "optimize.llm.service_start provider={} model={} base_url={}",
@@ -488,7 +648,13 @@ def optimize_with_llm(fields: dict[str, str | None]) -> OptimizationResult:
             return _optimize_with_ollama(sanitized, cfg)
         except Exception as exc:
             logger.exception("optimize.llm.ollama.error")
-            if isinstance(exc, requests.HTTPError) and exc.response is not None:
+            timeout_seconds = int(cfg.get("effective_llm_timeout_seconds", 300))
+            if isinstance(exc, requests.Timeout):
+                detail = (
+                    f"Ollama did not return within {timeout_seconds}s. "
+                    "Check Ollama server health/model load (e.g. 'ollama ps') or increase timeout in Config tab."
+                )
+            elif isinstance(exc, requests.HTTPError) and exc.response is not None:
                 response_preview = exc.response.text.strip()
                 detail = f"HTTP {exc.response.status_code}: {response_preview}"
             else:
@@ -519,11 +685,12 @@ def list_available_llm_models(
     base_url: str | None = None,
     timeout_seconds: int = 5,
     api_token: str | None = None,
+    config_override: dict[str, Any] | None = None,
 ) -> list[str]:
     normalized_provider = (provider or "").strip().lower()
     
     if normalized_provider == "ollama":
-        cfg = get_runtime_optimizer_config()
+        cfg = build_optimizer_config(config_override)
         resolved_base_url = (base_url or cfg.get("effective_llm_base_url") or "http://127.0.0.1:11434").strip().rstrip("/")
 
         try:
@@ -564,7 +731,7 @@ def list_available_llm_models(
             logger.warning("openai model discovery requires api_token parameter")
             return []
         
-        cfg = get_runtime_optimizer_config()
+        cfg = build_optimizer_config(config_override)
         resolved_base_url = (base_url or cfg.get("effective_llm_base_url") or "https://api.openai.com/v1").strip().rstrip("/")
         
         try:

@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 from collections.abc import Iterator
@@ -5,25 +6,31 @@ from time import perf_counter
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 from sqlalchemy.orm import Session
+from starlette.middleware.base import BaseHTTPMiddleware
 
+import auth_service
 import crud
-from database import SessionLocal
-from models import Prompt
+from database import SessionLocal, init_database
+from models import Prompt, User
 from optimizer_service import (
-    clear_runtime_model_id,
-    get_runtime_optimizer_config,
+    build_optimizer_config,
     list_available_llm_models,
     optimize_with_greaterprompt,
     optimize_with_llm,
-    set_runtime_optimizer_config,
 )
 from schemas import (
+    AuthResponse,
+    AuthStatus,
     OptimizeConfigOut,
     OptimizeConfigUpdate,
+    ProjectCreate,
+    ProjectOut,
+    RoleOut,
     PromptCreate,
     PromptData,
     PromptOptimizeResponse,
@@ -31,23 +38,76 @@ from schemas import (
     PromptTagsUpdate,
     PromptUpdate,
     PromptVersionOut,
+    ProjectAccessUpdate,
+    ProjectUpdate,
+    UserBootstrap,
+    UserCreate,
+    UserLogin,
+    UserOut,
+    UserUpdate,
 )
 
 app = FastAPI(title="Local Prompt Man")
 app.mount("/ui", StaticFiles(directory="ui"), name="ui")
+
+CONSOLE_LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
+SHOW_CONSOLE_SOURCE = CONSOLE_LOG_LEVEL in {"DEBUG", "TRACE"}
+
+
+def _console_log_format(record: dict) -> str:
+    def _escape_markup(value: object) -> str:
+        return str(value).replace("<", "\\<").replace(">", "\\>")
+
+    message = _escape_markup(record["message"])
+    source = f"{_escape_markup(record['name'])}:{_escape_markup(record['function'])}:{record['line']}"
+
+    badge = "<white>APP     </white>"
+    message_color = "<level>"
+
+    if message.startswith("request.start"):
+        badge = "<blue>HTTP IN </blue>"
+        message_color = "<blue>"
+    elif message.startswith("request.end"):
+        badge = "<green>HTTP OUT</green>"
+        message_color = "<green>"
+    elif message.startswith("request.error") or message.startswith("request.exception"):
+        badge = "<red>HTTP ERR</red>"
+        message_color = "<red>"
+    elif message.startswith("optimize.greaterprompt") or message.startswith("optimize.gradient"):
+        badge = "<magenta>GP      </magenta>"
+        message_color = "<magenta>"
+    elif message.startswith("optimize.llm"):
+        badge = "<yellow>LLM     </yellow>"
+        message_color = "<yellow>"
+    elif message.startswith("optimize.config"):
+        badge = "<cyan>CFG     </cyan>"
+        message_color = "<cyan>"
+    elif message.startswith("logging.configured"):
+        badge = "<green>BOOT    </green>"
+        message_color = "<green>"
+
+    source_part = f" <cyan>{source}</cyan> " if SHOW_CONSOLE_SOURCE else ""
+
+    return (
+        f"<dim>{record['time']:YYYY-MM-DD HH:mm:ss.SSS}</dim> "
+        f"{badge} "
+        f"<level>{record['level'].name:<8}</level> "
+        f"{source_part}"
+        f"{message_color}{message}</>\n{{exception}}"
+    )
 
 
 def configure_logging() -> None:
     os.makedirs("logs", exist_ok=True)
     logger.remove()
     logger.add(
-        sys.stdout,
-        level="INFO",
-        enqueue=False,
+        sys.stderr,
+        level=CONSOLE_LOG_LEVEL,
+        enqueue=True,
         backtrace=False,
         diagnose=False,
-        colorize=False,
-        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level} | {message}",
+        colorize=True,
+        format=_console_log_format,
     )
     logger.add(
         "logs/app.log",
@@ -60,43 +120,69 @@ def configure_logging() -> None:
         format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level} | {name}:{function}:{line} | {message}",
     )
 
+    # Uvicorn access logs have their own formatter and make console output inconsistent
+    # with the application logs emitted through Loguru below.
+    uvicorn_access_logger = logging.getLogger("uvicorn.access")
+    uvicorn_access_logger.handlers.clear()
+    uvicorn_access_logger.propagate = False
+
+    uvicorn_error_logger = logging.getLogger("uvicorn.error")
+    uvicorn_error_logger.handlers.clear()
+    uvicorn_error_logger.propagate = False
+
+
+class ExceptionLoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next) -> Response:  # type: ignore[no-untyped-def]
+        started_at = perf_counter()
+        try:
+            return await call_next(request)
+        except Exception:
+            duration_ms = (perf_counter() - started_at) * 1000
+            client = request.client.host if request.client else "unknown"
+            logger.exception(
+                "request.exception method={} path={} query={} client={} duration_ms={:.2f}",
+                request.method,
+                request.url.path,
+                request.url.query,
+                client,
+                duration_ms,
+            )
+            return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+
+
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next) -> Response:  # type: ignore[no-untyped-def]
+        start = perf_counter()
+        client = request.client.host if request.client else "unknown"
+        logger.info(
+            "request.start method={} path={} query={} client={}",
+            request.method,
+            request.url.path,
+            request.url.query,
+            client,
+        )
+
+        response = await call_next(request)
+
+        duration_ms = (perf_counter() - start) * 1000
+        logger.info(
+            "request.end method={} path={} status={} duration_ms={:.2f}",
+            request.method,
+            request.url.path,
+            response.status_code,
+            duration_ms,
+        )
+        return response
+
 
 configure_logging()
 logger.info("logging.configured sinks=console+file")
 
-
-@app.middleware("http")
-async def log_requests(request: Request, call_next) -> Response:  # type: ignore[no-untyped-def]
-    start = perf_counter()
-    client = request.client.host if request.client else "unknown"
-    logger.info(
-        "request.start method={} path={} query={} client={}",
-        request.method,
-        request.url.path,
-        request.url.query,
-        client,
-    )
-    try:
-        response: Response = await call_next(request)
-    except Exception:
-        duration_ms = (perf_counter() - start) * 1000
-        logger.exception(
-            "request.error method={} path={} duration_ms={:.2f}",
-            request.method,
-            request.url.path,
-            duration_ms,
-        )
-        raise
-
-    duration_ms = (perf_counter() - start) * 1000
-    logger.info(
-        "request.end method={} path={} status={} duration_ms={:.2f}",
-        request.method,
-        request.url.path,
-        response.status_code,
-        duration_ms,
-    )
-    return response
+# Order matters: request logging stays outermost so every request is traced,
+# while exception middleware centralizes uncaught exceptions and returns a
+# consistent 500 response.
+app.add_middleware(ExceptionLoggingMiddleware)
+app.add_middleware(RequestLoggingMiddleware)
 
 
 def get_db() -> Iterator[Session]:
@@ -105,6 +191,33 @@ def get_db() -> Iterator[Session]:
         yield db
     finally:
         db.close()
+
+
+@app.on_event("startup")
+def bootstrap_admin_if_needed() -> None:
+    init_database()
+    db = SessionLocal()
+    try:
+        auth_service.maybe_bootstrap_admin(db)
+    finally:
+        db.close()
+
+
+def to_user_out(user: User) -> UserOut:
+    return UserOut(**auth_service.user_to_dict(user))
+
+
+def to_project_out(project) -> ProjectOut:  # type: ignore[no-untyped-def]
+    return ProjectOut(id=project.id, name=project.name)
+
+
+def get_personal_config(db: Session, current_user: User) -> dict:
+    config = auth_service.get_or_create_personal_config(db, current_user)
+    return auth_service.serialize_optimizer_config(config)
+
+
+def allowed_projects(current_user: User) -> list[str] | None:
+    return auth_service.allowed_projects_for_user(current_user)
 
 
 def to_prompt_out(db: Session, prompt: Prompt) -> PromptOut:
@@ -130,14 +243,164 @@ def serve_ui() -> FileResponse:
     return FileResponse("ui/html/index.html")
 
 
+@app.post("/auth/bootstrap-admin", response_model=AuthResponse)
+def bootstrap_admin(data: UserBootstrap, db: Session = Depends(get_db)) -> AuthResponse:
+    if crud.list_users(db):
+        raise HTTPException(409, "Users already exist")
+    user = auth_service.create_user_record(
+        db,
+        username=data.username,
+        password=data.password,
+        role="admin",
+        is_active=True,
+        projects=[],
+    )
+    return AuthResponse(access_token=auth_service.issue_token_for_user(user), user=to_user_out(user))
+
+
+@app.post("/auth/login", response_model=AuthResponse)
+def login(data: UserLogin, db: Session = Depends(get_db)) -> AuthResponse:
+    user = auth_service.authenticate_user(db, data.username, data.password)
+    if not user:
+        raise HTTPException(401, "Invalid credentials")
+    return AuthResponse(access_token=auth_service.issue_token_for_user(user), user=to_user_out(user))
+
+
+@app.get("/auth/status", response_model=AuthStatus)
+def get_auth_status(db: Session = Depends(get_db)) -> AuthStatus:
+    has_users = bool(crud.list_users(db))
+    return AuthStatus(bootstrap_required=not has_users, has_users=has_users)
+
+
+@app.get("/auth/me", response_model=UserOut)
+def get_me(current_user: User = Depends(auth_service.get_current_user)) -> UserOut:
+    return to_user_out(current_user)
+
+
+@app.get("/roles", response_model=list[RoleOut])
+def list_roles(db: Session = Depends(get_db), _: User = Depends(auth_service.require_admin)) -> list[RoleOut]:
+    return [RoleOut(**item) for item in auth_service.list_roles_out(db)]
+
+
+@app.get("/users", response_model=list[UserOut])
+def list_users(db: Session = Depends(get_db), _: User = Depends(auth_service.require_admin)) -> list[UserOut]:
+    return [to_user_out(user) for user in crud.list_users(db)]
+
+
+@app.post("/users", response_model=UserOut)
+def create_user(data: UserCreate, db: Session = Depends(get_db), _: User = Depends(auth_service.require_admin)) -> UserOut:
+    user = auth_service.create_user_record(
+        db,
+        username=data.username,
+        password=data.password,
+        role=data.role,
+        is_active=data.is_active,
+        projects=data.projects,
+    )
+    return to_user_out(user)
+
+
+@app.get("/users/{user_id}", response_model=UserOut)
+def get_user(user_id: int, db: Session = Depends(get_db), _: User = Depends(auth_service.require_admin)) -> UserOut:
+    user = crud.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    return to_user_out(user)
+
+
+@app.put("/users/{user_id}", response_model=UserOut)
+def update_user(user_id: int, data: UserUpdate, db: Session = Depends(get_db), current_admin: User = Depends(auth_service.require_admin)) -> UserOut:
+    user = crud.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    if current_admin.id == user.id and data.role == "developer":
+        raise HTTPException(400, "Admin cannot remove own admin role")
+    updated = auth_service.update_user_record(
+        db,
+        user,
+        username=data.username,
+        password=data.password,
+        role=data.role,
+        is_active=data.is_active,
+        projects=data.projects,
+    )
+    return to_user_out(updated)
+
+
+@app.put("/users/{user_id}/projects", response_model=UserOut)
+def update_user_projects(user_id: int, data: ProjectAccessUpdate, db: Session = Depends(get_db), _: User = Depends(auth_service.require_admin)) -> UserOut:
+    user = crud.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    updated = crud.set_user_projects(db, user, data.projects)
+    return to_user_out(updated)
+
+
+@app.delete("/users/{user_id}", status_code=204)
+def delete_user(user_id: int, db: Session = Depends(get_db), current_admin: User = Depends(auth_service.require_admin)) -> Response:
+    user = crud.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    if current_admin.id == user.id:
+        raise HTTPException(400, "Admin cannot delete self")
+    crud.delete_user(db, user)
+    return Response(status_code=204)
+
+
+@app.get("/projects", response_model=list[ProjectOut])
+def list_projects(db: Session = Depends(get_db), _: User = Depends(auth_service.require_admin)) -> list[ProjectOut]:
+    return [to_project_out(project) for project in crud.list_projects(db)]
+
+
+@app.get("/projects/{project_id}", response_model=ProjectOut)
+def get_project(project_id: int, db: Session = Depends(get_db), _: User = Depends(auth_service.require_admin)) -> ProjectOut:
+    project = crud.get_project_by_id(db, project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+    return to_project_out(project)
+
+
+@app.post("/projects", response_model=ProjectOut)
+def create_project(data: ProjectCreate, db: Session = Depends(get_db), _: User = Depends(auth_service.require_admin)) -> ProjectOut:
+    try:
+        project = crud.create_project(db, data.name)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return to_project_out(project)
+
+
+@app.put("/projects/{project_id}", response_model=ProjectOut)
+def update_project(project_id: int, data: ProjectUpdate, db: Session = Depends(get_db), _: User = Depends(auth_service.require_admin)) -> ProjectOut:
+    project = crud.get_project_by_id(db, project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+    try:
+        updated = crud.update_project(db, project, name=data.name)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return to_project_out(updated)
+
+
+@app.delete("/projects/{project_id}", status_code=204)
+def delete_project(project_id: int, db: Session = Depends(get_db), _: User = Depends(auth_service.require_admin)) -> Response:
+    project = crud.get_project_by_id(db, project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+    crud.delete_project(db, project)
+    return Response(status_code=204)
+
+
 @app.get("/prompts/search", response_model=list[PromptOut])
 def search_prompts(
     tags: list[str] = Query(..., description="Tags to filter by (repeat for multiple)"),
     mode: Literal["and", "or"] = Query("or", description="'and' requires all tags; 'or' requires any tag"),
     project: str | None = None,
     db: Session = Depends(get_db),
+    current_user: User = Depends(auth_service.get_current_user),
 ) -> list[PromptOut]:
-    prompts = crud.search_prompts_by_tags(db, tags=tags, mode=mode, project=project)
+    if project is not None:
+        auth_service.ensure_project_access(current_user, project)
+    prompts = crud.search_prompts_by_tags(db, tags=tags, mode=mode, project=project, allowed_projects=allowed_projects(current_user))
     return [to_prompt_out(db, p) for p in prompts]
 
 
@@ -149,6 +412,7 @@ def list_prompts(
     limit: str | None = None,
     offset: str | None = None,
     db: Session = Depends(get_db),
+    current_user: User = Depends(auth_service.get_current_user),
 ) -> list[PromptOut]:
     # Convert string parameters to int safely
     limit_int: int | None = None
@@ -169,16 +433,19 @@ def list_prompts(
     except (ValueError, TypeError):
         offset_int = None
     
-    total_count = crud.count_prompts(db, project=project, tag=tag)
+    if project is not None:
+        auth_service.ensure_project_access(current_user, project)
+    total_count = crud.count_prompts(db, project=project, tag=tag, allowed_projects=allowed_projects(current_user))
     response.headers["X-Total-Count"] = str(total_count)
-    prompts = crud.list_prompts(db, project=project, tag=tag, limit=limit_int, offset=offset_int)
+    prompts = crud.list_prompts(db, project=project, tag=tag, limit=limit_int, offset=offset_int, allowed_projects=allowed_projects(current_user))
     return [to_prompt_out(db, prompt) for prompt in prompts]
 
 
 @app.post("/prompts", response_model=PromptOut)
-def create_prompt(data: PromptCreate, db: Session = Depends(get_db)) -> PromptOut:
+def create_prompt(data: PromptCreate, db: Session = Depends(get_db), current_user: User = Depends(auth_service.get_current_user)) -> PromptOut:
     logger.info("prompt.create name={} project={}", data.name, data.project)
-    prompt = crud.get_prompt(db, data.name, data.project)
+    auth_service.ensure_project_access(current_user, data.project)
+    prompt = crud.get_prompt(db, data.name, data.project, allowed_projects=allowed_projects(current_user))
     if prompt:
         logger.warning("prompt.create.duplicate name={} project={}", data.name, data.project)
         raise HTTPException(400, "Prompt already exists")
@@ -203,8 +470,9 @@ def create_prompt(data: PromptCreate, db: Session = Depends(get_db)) -> PromptOu
 
 
 @app.get("/prompts/{project}/{name}", response_model=PromptOut)
-def get_prompt(project: str, name: str, db: Session = Depends(get_db)) -> PromptOut:
-    prompt = crud.get_prompt(db, name, project)
+def get_prompt(project: str, name: str, db: Session = Depends(get_db), current_user: User = Depends(auth_service.get_current_user)) -> PromptOut:
+    auth_service.ensure_project_access(current_user, project)
+    prompt = crud.get_prompt(db, name, project, allowed_projects=allowed_projects(current_user))
     if not prompt:
         raise HTTPException(404, "Prompt not found")
 
@@ -212,9 +480,10 @@ def get_prompt(project: str, name: str, db: Session = Depends(get_db)) -> Prompt
 
 
 @app.delete("/prompts/{project}/{name}", status_code=204)
-def delete_prompt(project: str, name: str, db: Session = Depends(get_db)) -> Response:
+def delete_prompt(project: str, name: str, db: Session = Depends(get_db), current_user: User = Depends(auth_service.get_current_user)) -> Response:
     logger.info("prompt.delete project={} name={}", project, name)
-    prompt = crud.get_prompt(db, name, project)
+    auth_service.ensure_project_access(current_user, project)
+    prompt = crud.get_prompt(db, name, project, allowed_projects=allowed_projects(current_user))
     if not prompt:
         logger.warning("prompt.delete.not_found project={} name={}", project, name)
         raise HTTPException(404, "Prompt not found")
@@ -224,9 +493,10 @@ def delete_prompt(project: str, name: str, db: Session = Depends(get_db)) -> Res
 
 
 @app.put("/prompts/{project}/{name}", response_model=PromptVersionOut)
-def update_prompt(project: str, name: str, data: PromptUpdate, db: Session = Depends(get_db)) -> PromptVersionOut:
+def update_prompt(project: str, name: str, data: PromptUpdate, db: Session = Depends(get_db), current_user: User = Depends(auth_service.get_current_user)) -> PromptVersionOut:
     logger.info("prompt.update project={} name={}", project, name)
-    prompt = crud.get_prompt(db, name, project)
+    auth_service.ensure_project_access(current_user, project)
+    prompt = crud.get_prompt(db, name, project, allowed_projects=allowed_projects(current_user))
     if not prompt:
         logger.warning("prompt.update.not_found project={} name={}", project, name)
         raise HTTPException(404, "Prompt not found")
@@ -260,22 +530,24 @@ def update_prompt(project: str, name: str, data: PromptUpdate, db: Session = Dep
 
 
 @app.put("/prompts/{project}/{name}/tags", response_model=PromptOut)
-def update_prompt_tags(project: str, name: str, data: PromptTagsUpdate, db: Session = Depends(get_db)) -> PromptOut:
-    prompt = crud.get_prompt(db, name, project)
+def update_prompt_tags(project: str, name: str, data: PromptTagsUpdate, db: Session = Depends(get_db), current_user: User = Depends(auth_service.get_current_user)) -> PromptOut:
+    auth_service.ensure_project_access(current_user, project)
+    prompt = crud.get_prompt(db, name, project, allowed_projects=allowed_projects(current_user))
     if not prompt:
         raise HTTPException(404, "Prompt not found")
 
     crud.set_prompt_tags(db, prompt, data.tags)
     # Reload prompt from database to ensure all relationships are properly populated
-    prompt = crud.get_prompt(db, name, project)
+    prompt = crud.get_prompt(db, name, project, allowed_projects=allowed_projects(current_user))
     if not prompt:
         raise HTTPException(404, "Prompt not found after update")
     return to_prompt_out(db, prompt)
 
 
 @app.get("/prompts/{project}/{name}/versions", response_model=list[PromptVersionOut])
-def list_versions(project: str, name: str, db: Session = Depends(get_db)) -> list[PromptVersionOut]:
-    prompt = crud.get_prompt(db, name, project)
+def list_versions(project: str, name: str, db: Session = Depends(get_db), current_user: User = Depends(auth_service.get_current_user)) -> list[PromptVersionOut]:
+    auth_service.ensure_project_access(current_user, project)
+    prompt = crud.get_prompt(db, name, project, allowed_projects=allowed_projects(current_user))
     if not prompt:
         raise HTTPException(404, "Prompt not found")
 
@@ -295,8 +567,9 @@ def list_versions(project: str, name: str, db: Session = Depends(get_db)) -> lis
 
 
 @app.get("/prompts/{project}/{name}/versions/{version}", response_model=PromptVersionOut)
-def get_version(project: str, name: str, version: int, db: Session = Depends(get_db)) -> PromptVersionOut:
-    prompt = crud.get_prompt(db, name, project)
+def get_version(project: str, name: str, version: int, db: Session = Depends(get_db), current_user: User = Depends(auth_service.get_current_user)) -> PromptVersionOut:
+    auth_service.ensure_project_access(current_user, project)
+    prompt = crud.get_prompt(db, name, project, allowed_projects=allowed_projects(current_user))
     if not prompt:
         raise HTTPException(404, "Prompt not found")
 
@@ -316,9 +589,9 @@ def get_version(project: str, name: str, version: int, db: Session = Depends(get
 
 
 @app.post("/optimize/greaterprompt", response_model=PromptOptimizeResponse)
-def optimize_prompt(data: PromptData) -> PromptOptimizeResponse:
+def optimize_prompt(data: PromptData, db: Session = Depends(get_db), current_user: User = Depends(auth_service.get_current_user)) -> PromptOptimizeResponse:
     logger.info("optimize.greaterprompt.start")
-    result = optimize_with_greaterprompt(data.model_dump())
+    result = optimize_with_greaterprompt(data.model_dump(), get_personal_config(db, current_user))
     logger.info("optimize.greaterprompt.done engine={}", result.engine)
     optimized_dict = result.optimized_fields
     if not isinstance(optimized_dict, dict):
@@ -340,9 +613,9 @@ def optimize_prompt(data: PromptData) -> PromptOptimizeResponse:
 
 
 @app.post("/optimize/llm", response_model=PromptOptimizeResponse)
-def optimize_prompt_llm(data: PromptData) -> PromptOptimizeResponse:
+def optimize_prompt_llm(data: PromptData, db: Session = Depends(get_db), current_user: User = Depends(auth_service.get_current_user)) -> PromptOptimizeResponse:
     logger.info("optimize.llm.start")
-    result = optimize_with_llm(data.model_dump())
+    result = optimize_with_llm(data.model_dump(), get_personal_config(db, current_user))
     logger.info("optimize.llm.done engine={}", result.engine)
     optimized_dict = result.optimized_fields
     if not isinstance(optimized_dict, dict):
@@ -364,8 +637,8 @@ def optimize_prompt_llm(data: PromptData) -> PromptOptimizeResponse:
 
 
 @app.get("/optimize/config", response_model=OptimizeConfigOut)
-def get_optimize_config() -> OptimizeConfigOut:
-    cfg = get_runtime_optimizer_config()
+def get_optimize_config(db: Session = Depends(get_db), current_user: User = Depends(auth_service.get_current_user)) -> OptimizeConfigOut:
+    cfg = get_personal_config(db, current_user)
     logger.info(
         "optimize.config.get effective_model_id={} effective_gp_profile={} effective_llm_model={}",
         cfg.get("effective_model_id"),
@@ -376,7 +649,7 @@ def get_optimize_config() -> OptimizeConfigOut:
 
 
 @app.put("/optimize/config", response_model=OptimizeConfigOut)
-def update_optimize_config(data: OptimizeConfigUpdate) -> OptimizeConfigOut:
+def update_optimize_config(data: OptimizeConfigUpdate, db: Session = Depends(get_db), current_user: User = Depends(auth_service.get_current_user)) -> OptimizeConfigOut:
     logger.info(
         "optimize.config.update clear_model_id={} model_id={} gp_profile={} llm_model={} rounds={}",
         data.clear_model_id,
@@ -385,38 +658,7 @@ def update_optimize_config(data: OptimizeConfigUpdate) -> OptimizeConfigOut:
         data.llm_model,
         data.rounds,
     )
-    if data.clear_model_id:
-        cfg = clear_runtime_model_id()
-        if data.rounds is not None:
-            cfg = set_runtime_optimizer_config(rounds=data.rounds)
-        if (
-            data.gp_profile is not None
-            or data.llm_provider is not None
-            or data.llm_model is not None
-            or data.llm_base_url is not None
-            or data.llm_timeout_seconds is not None
-            or data.llm_api_token is not None
-        ):
-            cfg = set_runtime_optimizer_config(
-                gp_profile=data.gp_profile,
-                llm_provider=data.llm_provider,
-                llm_model=data.llm_model,
-                llm_base_url=data.llm_base_url,
-                llm_timeout_seconds=data.llm_timeout_seconds,
-                llm_api_token=data.llm_api_token,
-            )
-        return OptimizeConfigOut(**cfg)
-
-    cfg = set_runtime_optimizer_config(
-        model_id=data.model_id,
-        rounds=data.rounds,
-        gp_profile=data.gp_profile,
-        llm_provider=data.llm_provider,
-        llm_model=data.llm_model,
-        llm_base_url=data.llm_base_url,
-        llm_timeout_seconds=data.llm_timeout_seconds,
-        llm_api_token=data.llm_api_token,
-    )
+    cfg = auth_service.update_personal_config(db, current_user, data.model_dump())
     return OptimizeConfigOut(**cfg)
 
 
@@ -426,6 +668,14 @@ def get_provider_models(
     base_url: str | None = Query(None, description="Optional provider base URL override"),
     api_token: str | None = Query(None, description="Optional API token for authentication"),
     timeout_seconds: int = Query(5, ge=1, le=30, description="Timeout in seconds for provider model discovery"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(auth_service.get_current_user),
 ) -> list[str]:
-    models = list_available_llm_models(provider, base_url=base_url, timeout_seconds=timeout_seconds, api_token=api_token)
+    models = list_available_llm_models(
+        provider,
+        base_url=base_url,
+        timeout_seconds=timeout_seconds,
+        api_token=api_token,
+        config_override=get_personal_config(db, current_user),
+    )
     return models

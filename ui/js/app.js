@@ -5,6 +5,7 @@ const md        = (text) => marked.parse(text || "");
 const parseTags = (raw)  => raw.split(",").map((t) => t.trim()).filter(Boolean);
 const tagsToStr = (tags) => tags.join(", ");
 const key       = (p)   => p.project + "/" + p.name;
+const AUTH_TOKEN_STORAGE_KEY = "promptman.access_token";
 const emptyPromptData = () => ({
   role: "",
   task: "",
@@ -31,6 +32,17 @@ const defaultOptimizeConfig = () => ({
   effective_llm_timeout_seconds: 300,
   effective_has_llm_api_token: false,
 });
+const emptyUserForm = () => ({
+  username: "",
+  password: "",
+  role: "developer",
+  projects: [],
+  is_active: true,
+});
+const emptyProjectForm = () => ({
+  name: "",
+});
+const defaultUserRoleOptions = ["admin", "developer"];
 const llmProviderConfigs = {
   ollama: {
     label: "Ollama (Local)",
@@ -49,7 +61,76 @@ const llmProviderConfigs = {
   },
 };
 const llmProviderOptions = Object.keys(llmProviderConfigs);
-const gpProfileOptions = ["fast", "quality"];
+const gpProfileOptions = ["fast", "quality", "ultra"];
+const gpRecommendedModels = [
+  {
+    group: "Gemma",
+    value: "google/gemma-2-9b-it",
+    label: "Gemma-2-9B-IT",
+    supported: "✔",
+    quality: "High",
+    speed: "Fast",
+    vram: "~16-24 GB",
+    bestUse: "Primary GreaterPrompt model",
+    recommended: true,
+  },
+  {
+    group: "Gemma",
+    value: "google/gemma-2-27b-it",
+    label: "Gemma-2-27B-IT",
+    supported: "✔",
+    quality: "Very high",
+    speed: "Medium",
+    vram: "48+ GB",
+    bestUse: "Complex tasks",
+    recommended: false,
+  },
+  {
+    group: "LLaMA",
+    value: "meta-llama/Meta-Llama-3-8B-Instruct",
+    label: "LLaMA-3-8B-Instruct",
+    supported: "✔",
+    quality: "Medium-high",
+    speed: "Fast",
+    vram: "16 GB",
+    bestUse: "Local optimization",
+    recommended: false,
+  },
+  {
+    group: "LLaMA",
+    value: "meta-llama/Meta-Llama-3-70B-Instruct",
+    label: "LLaMA-3-70B-Instruct",
+    supported: "✔",
+    quality: "Very high",
+    speed: "Slow",
+    vram: "80+ GB",
+    bestUse: "Maximum quality",
+    recommended: false,
+  },
+  {
+    group: "Compatible",
+    value: "mistralai/Mistral-7B-Instruct-v0.3",
+    label: "Mistral-7B-Instruct",
+    supported: "✖",
+    quality: "Medium-high",
+    speed: "Very fast",
+    vram: "8-16 GB",
+    bestUse: "Economical option",
+    recommended: false,
+  },
+  {
+    group: "Compatible",
+    value: "Qwen/Qwen2-7B-Instruct",
+    label: "Qwen2-7B-Instruct",
+    supported: "✖",
+    quality: "High",
+    speed: "Fast",
+    vram: "8-16 GB",
+    bestUse: "Reasoning tasks",
+    recommended: false,
+  },
+];
+const gpRecommendedModelGroups = ["Gemma", "LLaMA", "Compatible"];
 const defaultLlmModelsByProvider = Object.fromEntries(
   Object.entries(llmProviderConfigs).map(([key, config]) => [key, config.models])
 );
@@ -68,6 +149,17 @@ const buildPromptMarkdown = (fields) => {
 
 createApp({
   setup() {
+    /* auth */
+    const authReady = ref(false);
+    const authToken = ref(window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || "");
+    const currentUser = ref(null);
+    const authMode = ref("login");
+    const authForm = ref({ username: "", password: "" });
+    const authError = ref("");
+    const authStatus = ref("");
+    const authBusy = ref(false);
+    const authBootstrapRequired = ref(false);
+
     /* tabs */
     const activeTab = ref("browse");
 
@@ -97,6 +189,7 @@ createApp({
     const newVersionExamples = ref("");
     const saveStatus        = ref("");
     const deleteStatus      = ref("");
+    const newVersionEditorOpen = ref(false);
 
     /* optimizer */
     const createOptimizeMenuOpen = ref(false);
@@ -104,6 +197,9 @@ createApp({
     const optimizerModalOpen = ref(false);
     const optimizerLoading = ref(false);
     const optimizerError = ref("");
+    const optimizerStatus = ref("");
+    const optimizerMode = ref("greaterprompt");
+    const optimizerLogs = ref([]);
     const optimizerEngine = ref("");
     const optimizerNotes = ref([]);
     const optimizedMarkdown = ref("");
@@ -117,15 +213,419 @@ createApp({
     const llmModelsLoading = ref(false);
     const llmModelsLoadError = ref("");
 
+    /* admin */
+    const roleOptions = ref([...defaultUserRoleOptions]);
+    const projects = ref([]);
+    const projectsLoading = ref(false);
+    const projectsStatus = ref("");
+    const newProjectForm = ref(emptyProjectForm());
+    const editingProjectId = ref(null);
+    const editProjectForm = ref(emptyProjectForm());
+    const users = ref([]);
+    const usersLoading = ref(false);
+    const usersStatus = ref("");
+    const newUserForm = ref(emptyUserForm());
+    const editingUserId = ref(null);
+    const editUserForm = ref(emptyUserForm());
+
+    const gpModelsByGroup = Object.fromEntries(
+      gpRecommendedModelGroups.map((group) => [
+        group,
+        gpRecommendedModels.filter((model) => model.group === group),
+      ])
+    );
+
+    const selectedGpModelMeta = computed(() => {
+      return gpRecommendedModels.find((model) => model.value === optimizeConfig.value.model_id) || null;
+    });
+    const isAuthenticated = computed(() => !!currentUser.value);
+    const isAdmin = computed(() => currentUser.value?.role === "admin");
+    const availableProjectNames = computed(() => projects.value.map((project) => project.name));
+    const currentUserProjectsLabel = computed(() => {
+      if (!currentUser.value) return "";
+      if (currentUser.value.role === "admin") return "All projects";
+      return (currentUser.value.projects || []).length ? currentUser.value.projects.join(", ") : "No assigned projects";
+    });
+
+    const nowTime = () => new Date().toLocaleTimeString("ru-RU", { hour12: false });
+
+    const setDefaultActiveTab = () => {
+      activeTab.value = currentUser.value?.role === "admin" ? "admin" : "browse";
+    };
+
+    const normalizeProjects = (raw) => {
+      if (Array.isArray(raw)) {
+        return raw.map((item) => String(item || "").trim()).filter(Boolean);
+      }
+      return String(raw || "")
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+    };
+
+    const saveToken = (token) => {
+      authToken.value = token || "";
+      if (authToken.value) {
+        window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, authToken.value);
+      } else {
+        window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+      }
+    };
+
+    const clearSession = (reason = "") => {
+      saveToken("");
+      currentUser.value = null;
+      activeTab.value = "browse";
+      items.value = [];
+      browseTotalItems.value = 0;
+      expandedKey.value = null;
+      expandedVersions.value = [];
+      optimizerModalOpen.value = false;
+      users.value = [];
+      projects.value = [];
+      optimizeConfig.value = defaultOptimizeConfig();
+      if (reason) {
+        authError.value = reason;
+      }
+    };
+
+    const authHeaders = (headers = {}) => {
+      const merged = { ...headers };
+      if (authToken.value) {
+        merged.Authorization = `Bearer ${authToken.value}`;
+      }
+      return merged;
+    };
+
+    const apiFetch = async (url, options = {}, allow401 = false) => {
+      const requestOptions = {
+        ...options,
+        headers: authHeaders(options.headers || {}),
+      };
+      const response = await fetch(url, requestOptions);
+      if (response.status === 401 && !allow401) {
+        clearSession("Session expired. Please sign in again.");
+      }
+      return response;
+    };
+
+    const fetchAuthStatus = async () => {
+      try {
+        const res = await fetch("/auth/status");
+        if (!res.ok) {
+          authBootstrapRequired.value = false;
+          authMode.value = "login";
+          return;
+        }
+        const payload = await res.json();
+        authBootstrapRequired.value = !!payload.bootstrap_required;
+        authMode.value = payload.bootstrap_required ? "bootstrap" : "login";
+      } catch (err) {
+        authBootstrapRequired.value = false;
+        authMode.value = "login";
+      }
+    };
+
+    const loadUsers = async () => {
+      if (!isAdmin.value) {
+        users.value = [];
+        return;
+      }
+      usersLoading.value = true;
+      usersStatus.value = "";
+      const res = await apiFetch("/users");
+      if (!res.ok) {
+        usersLoading.value = false;
+        usersStatus.value = `Failed to load users (${res.status})`;
+        return;
+      }
+      users.value = await res.json();
+      usersLoading.value = false;
+    };
+
+    const loadProjects = async () => {
+      if (!isAdmin.value) {
+        projects.value = [];
+        return;
+      }
+      projectsLoading.value = true;
+      projectsStatus.value = "";
+      const res = await apiFetch("/projects");
+      if (!res.ok) {
+        projectsLoading.value = false;
+        projectsStatus.value = `Failed to load projects (${res.status})`;
+        return;
+      }
+      projects.value = await res.json();
+      projectsLoading.value = false;
+    };
+
+    const loadRoles = async () => {
+      if (!isAdmin.value) {
+        roleOptions.value = [...defaultUserRoleOptions];
+        return;
+      }
+      const res = await apiFetch("/roles");
+      if (!res.ok) {
+        roleOptions.value = [...defaultUserRoleOptions];
+        return;
+      }
+      const roles = await res.json();
+      roleOptions.value = Array.isArray(roles) && roles.length
+        ? roles.map((item) => item.name)
+        : [...defaultUserRoleOptions];
+    };
+
+    const initializeAuthenticatedApp = async () => {
+      setDefaultActiveTab();
+      await fetchPrompts();
+      await loadOptimizeConfig();
+      await loadRoles();
+      await loadProjects();
+      await loadUsers();
+    };
+
+    const loadCurrentUser = async () => {
+      if (!authToken.value) {
+        return false;
+      }
+      const res = await apiFetch("/auth/me", {}, true);
+      if (!res.ok) {
+        clearSession("");
+        return false;
+      }
+      currentUser.value = await res.json();
+      return true;
+    };
+
+    const submitAuth = async () => {
+      authBusy.value = true;
+      authError.value = "";
+      authStatus.value = "";
+      const endpoint = authMode.value === "bootstrap" ? "/auth/bootstrap-admin" : "/auth/login";
+      try {
+        const res = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: authForm.value.username.trim(),
+            password: authForm.value.password,
+          }),
+        });
+        if (!res.ok) {
+          if (res.status === 409 && authMode.value === "bootstrap") {
+            authBootstrapRequired.value = false;
+            authMode.value = "login";
+            authError.value = "Bootstrap is no longer available. Sign in with an existing account.";
+            return;
+          }
+          const detail = await res.text();
+          authError.value = detail || `Authentication failed (${res.status})`;
+          return;
+        }
+        const payload = await res.json();
+        saveToken(payload.access_token || "");
+        currentUser.value = payload.user || null;
+        authForm.value.password = "";
+        authStatus.value = authMode.value === "bootstrap" ? "Admin account created." : "Signed in.";
+        await initializeAuthenticatedApp();
+      } catch (err) {
+        authError.value = "Authentication request failed.";
+      } finally {
+        authBusy.value = false;
+      }
+    };
+
+    const logout = () => {
+      clearSession("");
+      authStatus.value = "Signed out.";
+      fetchAuthStatus();
+    };
+
+    const beginEditUser = (user) => {
+      editingUserId.value = user.id;
+      editUserForm.value = {
+        username: user.username || "",
+        password: "",
+        role: user.role || "developer",
+        projects: [...(user.projects || [])],
+        is_active: !!user.is_active,
+      };
+      usersStatus.value = "";
+    };
+
+    const resolveFormState = (formRef) => formRef?.value ?? formRef ?? {};
+
+    const toggleProjectSelection = (formRef, projectName) => {
+      const formState = resolveFormState(formRef);
+      const current = new Set(normalizeProjects(formState.projects));
+      if (current.has(projectName)) {
+        current.delete(projectName);
+      } else {
+        current.add(projectName);
+      }
+      formState.projects = [...current].sort((left, right) => left.localeCompare(right));
+    };
+
+    const isProjectSelected = (formRef, projectName) => {
+      const formState = resolveFormState(formRef);
+      return normalizeProjects(formState.projects).includes(projectName);
+    };
+
+    const cancelUserEdit = () => {
+      editingUserId.value = null;
+      editUserForm.value = emptyUserForm();
+    };
+
+    const createProjectRecord = async () => {
+      projectsStatus.value = "";
+      const res = await apiFetch("/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newProjectForm.value.name.trim() }),
+      });
+      if (!res.ok) {
+        projectsStatus.value = `Failed to create project (${res.status})`;
+        return;
+      }
+      newProjectForm.value = emptyProjectForm();
+      projectsStatus.value = "Project created";
+      await loadProjects();
+    };
+
+    const beginEditProject = (project) => {
+      editingProjectId.value = project.id;
+      editProjectForm.value = { name: project.name || "" };
+      projectsStatus.value = "";
+    };
+
+    const cancelProjectEdit = () => {
+      editingProjectId.value = null;
+      editProjectForm.value = emptyProjectForm();
+    };
+
+    const saveProjectEdit = async (projectId) => {
+      projectsStatus.value = "";
+      const res = await apiFetch(`/projects/${projectId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: editProjectForm.value.name.trim() }),
+      });
+      if (!res.ok) {
+        projectsStatus.value = `Failed to update project (${res.status})`;
+        return;
+      }
+      projectsStatus.value = "Project updated";
+      cancelProjectEdit();
+      await loadProjects();
+      await loadUsers();
+      await fetchPrompts();
+    };
+
+    const deleteProjectRecord = async (project) => {
+      projectsStatus.value = "";
+      if (!window.confirm(`Delete project ${project.name}? All related prompts and access rules will be removed.`)) return;
+      const res = await apiFetch(`/projects/${project.id}`, { method: "DELETE" });
+      if (!res.ok) {
+        projectsStatus.value = `Failed to delete project (${res.status})`;
+        return;
+      }
+      projectsStatus.value = "Project deleted";
+      await loadProjects();
+      await loadUsers();
+      await fetchPrompts(1);
+    };
+
+    const createUserAccount = async () => {
+      usersStatus.value = "";
+      const payload = {
+        username: newUserForm.value.username.trim(),
+        password: newUserForm.value.password,
+        role: newUserForm.value.role,
+        projects: normalizeProjects(newUserForm.value.projects),
+        is_active: !!newUserForm.value.is_active,
+      };
+      const res = await apiFetch("/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        usersStatus.value = `Failed to create user (${res.status})`;
+        return;
+      }
+      newUserForm.value = emptyUserForm();
+      usersStatus.value = "User created";
+      await loadUsers();
+    };
+
+    const saveUserEdit = async (userId) => {
+      usersStatus.value = "";
+      const payload = {
+        username: editUserForm.value.username.trim(),
+        role: editUserForm.value.role,
+        projects: normalizeProjects(editUserForm.value.projects),
+        is_active: !!editUserForm.value.is_active,
+      };
+      if (editUserForm.value.password) {
+        payload.password = editUserForm.value.password;
+      }
+      const res = await apiFetch(`/users/${userId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        usersStatus.value = `Failed to update user (${res.status})`;
+        return;
+      }
+      usersStatus.value = "User updated";
+      cancelUserEdit();
+      await loadUsers();
+      if (currentUser.value?.id === userId) {
+        await loadCurrentUser();
+      }
+    };
+
+    const deleteUserAccount = async (user) => {
+      usersStatus.value = "";
+      if (!window.confirm(`Delete user ${user.username}?`)) return;
+      const res = await apiFetch(`/users/${user.id}`, { method: "DELETE" });
+      if (!res.ok) {
+        usersStatus.value = `Failed to delete user (${res.status})`;
+        return;
+      }
+      usersStatus.value = "User deleted";
+      await loadUsers();
+    };
+
+    const pushOptimizerLog = (message, level = "info") => {
+      optimizerLogs.value.push({
+        ts: nowTime(),
+        level,
+        message,
+      });
+    };
+
+    const normalizePageNumber = (page) => {
+      const parsed = Number(page);
+      return Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : 1;
+    };
+
     const fetchPrompts = async (page = browsePage.value) => {
-      browsePage.value = Math.max(1, page);
+      if (!currentUser.value) {
+        items.value = [];
+        browseTotalItems.value = 0;
+        return;
+      }
+      browsePage.value = normalizePageNumber(page);
       const p = new URLSearchParams();
       if (filterProject.value.trim()) p.set("project", filterProject.value.trim());
       if (filterTag.value.trim())     p.set("tag",     filterTag.value.trim());
       p.set("limit", String(browsePageSize.value));
       p.set("offset", String((browsePage.value - 1) * browsePageSize.value));
       const q   = p.toString();
-      const res = await fetch("/prompts" + (q ? "?" + q : ""));
+      const res = await apiFetch("/prompts" + (q ? "?" + q : ""));
       if (!res.ok) {
         console.error("fetchPrompts failed:", res.status, res.statusText);
         items.value = [];
@@ -144,22 +644,16 @@ createApp({
     const paginatedItems = computed(() => items.value);
 
     const setBrowsePage = async (page) => {
-      const nextPage = Math.min(Math.max(1, page), totalBrowsePages.value);
+      const nextPage = Math.min(normalizePageNumber(page), totalBrowsePages.value);
       await fetchPrompts(nextPage);
     };
 
-    const browseRangeLabel = computed(() => {
-      if (!browseTotalItems.value || !items.value.length) {
-        return "Showing 0 of 0";
-      }
-      const currentPage = Math.min(browsePage.value, totalBrowsePages.value);
-      const start = (currentPage - 1) * browsePageSize.value + 1;
-      const end = Math.min(start + items.value.length - 1, browseTotalItems.value);
-      return `Showing ${start}-${end} of ${browseTotalItems.value}`;
+    const browseSummaryLabel = computed(() => {
+      return `Total ${browseTotalItems.value || 0}`;
     });
 
     const loadVersions = async (p) => {
-      const res = await fetch("/prompts/" + p.project + "/" + p.name + "/versions");
+      const res = await apiFetch("/prompts/" + p.project + "/" + p.name + "/versions");
       expandedVersions.value = res.ok ? await res.json() : [];
     };
 
@@ -168,6 +662,7 @@ createApp({
       if (expandedKey.value === k) {
         expandedKey.value = null; expandedVersions.value = [];
         openVersionKey.value = null; editTagsMode.value = false;
+        newVersionEditorOpen.value = false;
         newVersionRole.value = ""; newVersionTask.value = ""; newVersionContext.value = "";
         newVersionConstraints.value = ""; newVersionOutputFormat.value = ""; newVersionExamples.value = "";
         saveStatus.value = "";
@@ -176,6 +671,7 @@ createApp({
       }
       expandedKey.value       = k;
       editTagsMode.value      = false;
+      newVersionEditorOpen.value = false;
       editTagsStr.value       = tagsToStr(p.tags);
       newVersionRole.value    = p.role || "";
       newVersionTask.value    = p.task || "";
@@ -194,7 +690,7 @@ createApp({
       const confirmed = window.confirm(`Delete prompt ${p.project} / ${p.name}? This cannot be undone.`);
       if (!confirmed) return;
 
-      const res = await fetch("/prompts/" + p.project + "/" + p.name, {
+      const res = await apiFetch("/prompts/" + p.project + "/" + p.name, {
         method: "DELETE",
       });
 
@@ -213,7 +709,7 @@ createApp({
 
     const saveNewVersion = async (p) => {
       saveStatus.value = "";
-      const res = await fetch("/prompts/" + p.project + "/" + p.name, {
+      const res = await apiFetch("/prompts/" + p.project + "/" + p.name, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -242,7 +738,7 @@ createApp({
 
     const saveTags = async (p) => {
       saveStatus.value = "";
-      const res = await fetch("/prompts/" + p.project + "/" + p.name + "/tags", {
+      const res = await apiFetch("/prompts/" + p.project + "/" + p.name + "/tags", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tags: parseTags(editTagsStr.value) }),
@@ -255,9 +751,16 @@ createApp({
 
     const createPrompt = async () => {
       createStatus.value = "";
+      const name = form.value.name.trim();
+      const project = form.value.project.trim();
+      if (!name || !project) {
+        createStatus.value = "Name and Project are required";
+        return;
+      }
+
       const payload = {
-        name:    form.value.name.trim(),
-        project: form.value.project.trim(),
+        name,
+        project,
         tags:    parseTags(form.value.tags),
         role:    form.value.role || null,
         task:    form.value.task,
@@ -266,7 +769,7 @@ createApp({
         output_format: form.value.output_format || null,
         examples: form.value.examples || null,
       };
-      const res = await fetch("/prompts", {
+      const res = await apiFetch("/prompts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -305,11 +808,13 @@ createApp({
       return getProviderConfig(provider).baseUrl || "http://127.0.0.1:11434";
     };
 
+    const getProviderDefaultModel = (provider) => {
+      return getDefaultProviderModels(provider)[0] || "";
+    };
+
     const updateProviderBaseUrl = (provider = optimizeConfig.value.llm_provider) => {
-      const key = String(provider || "").toLowerCase();
-      if (key === "ollama") {
-        optimizeConfig.value.llm_base_url = getProviderDefaultBaseUrl(key);
-      }
+      optimizeConfig.value.llm_base_url = getProviderDefaultBaseUrl(provider);
+      optimizeConfig.value.llm_model = getProviderDefaultModel(provider);
     };
 
     const modelRequiresToken = (provider = optimizeConfig.value.llm_provider) => {
@@ -317,7 +822,7 @@ createApp({
       return ["openai", "anthropic"].includes(key);
     };
 
-    const loadAvailableLlmModels = async (provider = optimizeConfig.value.llm_provider) => {
+    const loadAvailableLlmModels = async (provider = optimizeConfig.value.llm_provider, preserveCurrentModel = true) => {
       llmModelsLoading.value = true;
       llmModelsLoadError.value = "";
 
@@ -334,7 +839,7 @@ createApp({
         }
         params.set("timeout_seconds", "5");
 
-        const res = await fetch(`/optimize/providers/${encodeURIComponent(selectedProvider)}/models?${params.toString()}`);
+        const res = await apiFetch(`/optimize/providers/${encodeURIComponent(selectedProvider)}/models?${params.toString()}`);
         if (!res.ok) {
           llmModelsLoadError.value = `Failed to load provider models (${res.status})`;
           availableLlmModels.value = fallbackModels;
@@ -353,18 +858,24 @@ createApp({
         availableLlmModels.value = fallbackModels;
       } finally {
         const currentModel = (optimizeConfig.value.llm_model || "").trim();
-        if (currentModel && !availableLlmModels.value.includes(currentModel)) {
+        if (preserveCurrentModel && currentModel && !availableLlmModels.value.includes(currentModel)) {
           availableLlmModels.value = [currentModel, ...availableLlmModels.value];
         }
-        if (!optimizeConfig.value.llm_model && availableLlmModels.value.length) {
-          optimizeConfig.value.llm_model = availableLlmModels.value[0];
+        if (!currentModel || !availableLlmModels.value.includes(currentModel)) {
+          if (availableLlmModels.value.length) {
+            optimizeConfig.value.llm_model = availableLlmModels.value[0];
+          }
         }
         llmModelsLoading.value = false;
       }
     };
 
     const loadOptimizeConfig = async () => {
-      const res = await fetch("/optimize/config");
+      if (!currentUser.value) {
+        optimizeConfig.value = defaultOptimizeConfig();
+        return;
+      }
+      const res = await apiFetch("/optimize/config");
       if (!res.ok) {
         optimizeConfigStatus.value = "Failed to load optimize config (" + res.status + ")";
         return;
@@ -398,7 +909,7 @@ createApp({
         llm_timeout_seconds: Number(optimizeConfig.value.llm_timeout_seconds) || 300,
         llm_api_token: optimizeConfig.value.llm_api_token || null,
       };
-      const res = await fetch("/optimize/config", {
+      const res = await apiFetch("/optimize/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -421,30 +932,104 @@ createApp({
     const optimizePrompt = async (endpoint, fields, source, target = null) => {
       optimizerLoading.value = true;
       optimizerError.value = "";
+      optimizerStatus.value = "Optimization started";
       optimizerEngine.value = "";
       optimizerNotes.value = [];
+      optimizerLogs.value = [];
       optimizedMarkdown.value = "";
       optimizeEndpoint.value = endpoint;
       optimizeInputSource.value = source;
       optimizeTargetPrompt.value = target;
+      optimizerMode.value = endpoint.includes("/llm") ? "llm" : "greaterprompt";
       optimizerModalOpen.value = true;
 
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(promptPayload(fields)),
-      });
+      pushOptimizerLog(
+        `Started ${optimizerMode.value === "llm" ? "LLM" : "GreaterPrompt"} optimization from ${source}.`
+      );
+      pushOptimizerLog("Saving active optimization config before request ...");
 
-      if (!res.ok) {
+      const saved = await persistOptimizeConfig(false);
+      if (!saved) {
         optimizerLoading.value = false;
-        optimizerError.value = "Optimization failed (" + res.status + ")";
+        optimizerStatus.value = "Optimization failed";
+        optimizerError.value = "Unable to save optimization config before optimization.";
+        pushOptimizerLog("Failed to save optimization config before optimization.", "error");
         return;
       }
 
-      const data = await res.json();
+      pushOptimizerLog("Optimization config saved and applied.", "success");
+      if (optimizerMode.value === "llm") {
+        pushOptimizerLog(
+          `Using provider=${optimizeConfig.value.effective_llm_provider || optimizeConfig.value.llm_provider}, model=${optimizeConfig.value.effective_llm_model || optimizeConfig.value.llm_model}, timeout=${optimizeConfig.value.effective_llm_timeout_seconds || optimizeConfig.value.llm_timeout_seconds}s.`
+        );
+      } else {
+        const activeGpModel = optimizeConfig.value.effective_model_id || optimizeConfig.value.model_id || "lightweight mode";
+        pushOptimizerLog(
+          `Using GP profile=${optimizeConfig.value.effective_gp_profile || optimizeConfig.value.gp_profile}, rounds=${optimizeConfig.value.effective_rounds || optimizeConfig.value.rounds}, model=${activeGpModel}.`
+        );
+      }
+      pushOptimizerLog(`Sending request to ${endpoint} ...`);
+
+      let res;
+      try {
+        res = await apiFetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(promptPayload(fields)),
+        });
+      } catch (err) {
+        optimizerLoading.value = false;
+        optimizerStatus.value = "Optimization failed";
+        optimizerError.value = "Optimization request failed before response.";
+        pushOptimizerLog("Request failed: network/server error.", "error");
+        return;
+      }
+
+      if (!res.ok) {
+        optimizerLoading.value = false;
+        optimizerStatus.value = "Optimization failed";
+        let details = "";
+        try {
+          details = await res.text();
+        } catch (err) {
+          details = "";
+        }
+        optimizerError.value = "Optimization failed (" + res.status + ")";
+        pushOptimizerLog(
+          `Optimization failed with HTTP ${res.status}${details ? `: ${details.slice(0, 220)}` : ""}`,
+          "error"
+        );
+        return;
+      }
+
+      pushOptimizerLog(`Response received (HTTP ${res.status}). Parsing payload ...`);
+
+      let data;
+      try {
+        data = await res.json();
+      } catch (err) {
+        optimizerLoading.value = false;
+        optimizerStatus.value = "Optimization failed";
+        optimizerError.value = "Optimization response is not valid JSON.";
+        pushOptimizerLog("Response parse failed: invalid JSON payload.", "error");
+        return;
+      }
+
       optimizerLoading.value = false;
       optimizerEngine.value = data.engine || "greaterprompt";
       optimizerNotes.value = data.notes || [];
+      optimizerStatus.value = optimizerEngine.value.includes("fallback")
+        ? "Optimization finished with fallback"
+        : "Optimization completed";
+
+      pushOptimizerLog(`Completed. Engine: ${optimizerEngine.value}.`, optimizerEngine.value.includes("fallback") ? "warn" : "success");
+      if (Array.isArray(optimizerNotes.value) && optimizerNotes.value.length) {
+        optimizerNotes.value.forEach((note) => {
+          const level = String(note || "").toLowerCase().includes("failed") ? "warn" : "info";
+          pushOptimizerLog(String(note), level);
+        });
+      }
+
       optimizedMarkdown.value = data.optimized_markdown || "";
       optimizedDraft.value = {
         role: data.optimized.role || "",
@@ -458,11 +1043,16 @@ createApp({
 
     const reoptimizePrompt = async () => {
       optimizerError.value = "";
+      pushOptimizerLog("Reoptimize clicked. Saving config before restart ...");
       const saved = await persistOptimizeConfig(false);
       if (!saved) {
+        optimizerStatus.value = "Reoptimize failed";
         optimizerError.value = "Reoptimize failed: unable to save optimization config.";
+        pushOptimizerLog("Failed to save optimization config before reoptimize.", "error");
         return;
       }
+
+      pushOptimizerLog("Config saved. Restarting optimization ...");
 
       await optimizePrompt(
         optimizeEndpoint.value,
@@ -534,7 +1124,7 @@ createApp({
         return;
       }
 
-      const res = await fetch("/prompts/" + target.project + "/" + target.name, {
+      const res = await apiFetch("/prompts/" + target.project + "/" + target.name, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(promptPayload(optimizedDraft.value)),
@@ -555,38 +1145,91 @@ createApp({
     };
 
     onMounted(async () => {
-      await fetchPrompts();
-      await loadOptimizeConfig();
+      await fetchAuthStatus();
+      if (await loadCurrentUser()) {
+        await initializeAuthenticatedApp();
+      }
+      authReady.value = true;
     });
 
     return {
+      authReady, authToken, currentUser, authMode, authForm, authError, authStatus, authBusy, authBootstrapRequired, isAuthenticated, isAdmin, currentUserProjectsLabel,
       activeTab, form, createStatus,
-      items, filterProject, filterTag, fetchPrompts, browsePage, browsePageSize, browseTotalItems, totalBrowsePages, paginatedItems, setBrowsePage, browseRangeLabel,
+      items, filterProject, filterTag, fetchPrompts, browsePage, browsePageSize, browseTotalItems, totalBrowsePages, paginatedItems, setBrowsePage, browseSummaryLabel,
       expandedKey, expandedVersions, openVersionKey,
       editTagsMode, editTagsStr, newVersionRole, newVersionTask, newVersionContext, newVersionConstraints, newVersionOutputFormat, newVersionExamples, saveStatus,
+      newVersionEditorOpen,
       createOptimizeMenuOpen, browseOptimizeMenuKey,
-      optimizerModalOpen, optimizerLoading, optimizerError, optimizerEngine, optimizerNotes,
+      optimizerModalOpen, optimizerLoading, optimizerError, optimizerStatus, optimizerMode, optimizerLogs, optimizerEngine, optimizerNotes,
       optimizedMarkdown, optimizedDraft,
       optimizeConfig, optimizeConfigStatus, llmProviderOptions, availableLlmModels, llmModelsLoading, llmModelsLoadError, gpProfileOptions,
+      roleOptions, projects, projectsLoading, projectsStatus, newProjectForm, editingProjectId, editProjectForm,
+      users, usersLoading, usersStatus, newUserForm, editingUserId, editUserForm, availableProjectNames,
+      gpRecommendedModels, gpRecommendedModelGroups, gpModelsByGroup, selectedGpModelMeta,
       key, togglePrompt, saveNewVersion, saveTags, createPrompt,
       deletePrompt,
       optimizeFromCreate, optimizeFromCreateLLM,
       optimizeFromBrowse, optimizeFromBrowseLLM,
       applyOptimizedPrompt, reoptimizePrompt, saveOptimizeConfig, loadAvailableLlmModels, updateProviderBaseUrl, getProviderLabel, modelRequiresToken,
+      submitAuth, logout, createProjectRecord, beginEditProject, cancelProjectEdit, saveProjectEdit, deleteProjectRecord,
+      createUserAccount, beginEditUser, cancelUserEdit, saveUserEdit, deleteUserAccount, loadUsers, loadProjects,
+      toggleProjectSelection, isProjectSelected,
       md, buildPromptMarkdown,
       deleteStatus,
     };
   },
 
   template: `
+    <div v-if="!authReady" class="auth-shell">
+      <div class="auth-card">
+        <h1>Prompt Man</h1>
+        <p class="subtitle">Loading session...</p>
+      </div>
+    </div>
+
+    <div v-else-if="!isAuthenticated" class="auth-shell">
+      <div class="auth-card">
+        <h1>Prompt Man</h1>
+        <p class="subtitle">{{ authBootstrapRequired ? 'Create the first admin account for this workspace.' : 'Sign in to access prompts and personal optimization config.' }}</p>
+        <div class="field">
+          <label>Username</label>
+          <input v-model="authForm.username" placeholder="admin" />
+        </div>
+        <div class="field">
+          <label>Password</label>
+          <input type="password" v-model="authForm.password" placeholder="Enter password" @keyup.enter="submitAuth" />
+        </div>
+        <div class="btn-row auth-actions">
+          <button @click="submitAuth" :disabled="authBusy || !authForm.username.trim() || !authForm.password">{{ authBusy ? 'Please wait...' : (authMode === 'bootstrap' ? 'Create Admin' : 'Sign In') }}</button>
+          <button class="ghost" v-if="!authBootstrapRequired" @click="authMode='login'">Use login</button>
+        </div>
+        <p v-if="authStatus" class="status-ok">{{ authStatus }}</p>
+        <p v-if="authError" class="status-err">{{ authError }}</p>
+      </div>
+    </div>
+
+    <template v-else>
     <header style="margin-bottom:4px">
-      <h1>Prompt Man</h1>
-      <p class="subtitle">Versioned prompts with tags &amp; markdown.</p>
+      <div class="header-topline">
+        <div>
+          <h1>Prompt Man</h1>
+          <p class="subtitle">Versioned prompts with tags, markdown, and per-user optimization config.</p>
+        </div>
+        <div class="auth-banner">
+          <div>
+            <div class="auth-banner-user">{{ currentUser.username }}</div>
+            <div class="auth-banner-meta">Role: {{ currentUser.role }} | Projects: {{ currentUserProjectsLabel }}</div>
+          </div>
+          <button class="ghost" @click="logout">Logout</button>
+        </div>
+      </div>
     </header>
 
     <div class="tabs">
       <button class="tab-btn" :class="{active: activeTab==='browse'}" @click="activeTab='browse'">Browse</button>
       <button class="tab-btn" :class="{active: activeTab==='create'}" @click="activeTab='create'">+ Create</button>
+      <button class="tab-btn" :class="{active: activeTab==='config'}" @click="activeTab='config'">Config</button>
+      <button v-if="isAdmin" class="tab-btn" :class="{active: activeTab==='admin'}" @click="activeTab='admin'">Admin</button>
     </div>
 
     <!-- BROWSE TAB -->
@@ -606,7 +1249,7 @@ createApp({
       </div>
 
       <div class="browse-toolbar" v-if="browseTotalItems>0">
-        <p class="browse-summary">{{ browseRangeLabel }}</p>
+        <p class="browse-summary">{{ browseSummaryLabel }}</p>
         <div class="browse-pagination-controls">
           <label class="browse-page-size-label">
             Per page
@@ -682,8 +1325,13 @@ createApp({
 
             <!-- New version editor -->
             <div class="detail-section">
-              <h4>Create new version</h4>
-              <div class="new-version-editor">
+              <div class="section-title-row">
+                <h4 style="margin:0">Create new version</h4>
+                <button class="ghost" @click="newVersionEditorOpen = !newVersionEditorOpen">
+                  {{ newVersionEditorOpen ? 'Hide' : 'Show' }}
+                </button>
+              </div>
+              <div class="new-version-editor" v-if="newVersionEditorOpen">
                 <div class="new-version-group">
                   <p class="new-version-group-title">Prompt components</p>
                   <div class="field">
@@ -720,7 +1368,7 @@ createApp({
                 </div>
               </div>
               <div class="btn-row">
-                <button @click="saveNewVersion(p)">Save as new version</button>
+                <button v-if="newVersionEditorOpen" @click="saveNewVersion(p)">Save as new version</button>
               </div>
               <p v-if="saveStatus" :class="saveStatus.includes('failed') ? 'status-err' : 'status-ok'">{{ saveStatus }}</p>
             </div>
@@ -757,12 +1405,12 @@ createApp({
       <h2 style="margin-top:0">New Prompt</h2>
       <div class="create-grid">
         <div class="field">
-          <label>Name</label>
-          <input v-model="form.name" placeholder="checkout-system" />
+          <label>Name (required)</label>
+          <input v-model="form.name" placeholder="checkout-system" required />
         </div>
         <div class="field">
-          <label>Project</label>
-          <input v-model="form.project" placeholder="payments" />
+          <label>Project (required)</label>
+          <input v-model="form.project" placeholder="payments" required />
         </div>
       </div>
       <div class="field">
@@ -816,6 +1464,347 @@ createApp({
       <p v-if="createStatus" :class="createStatus.includes('failed') ? 'status-err' : 'status-ok'">{{ createStatus }}</p>
     </div>
 
+    <!-- CONFIG TAB -->
+    <div class="tab-panel" v-if="activeTab==='config'">
+      <h2 style="margin-top:0">Optimization Config</h2>
+      <p style="margin:0 0 12px;color:var(--muted)">Manage active settings for LLM and GreaterPrompt optimization. These settings are stored per user.</p>
+
+      <div class="opt-config-box opt-config-box-standalone">
+        <div class="opt-settings-group">
+          <h5>LLM Settings</h5>
+          <div class="opt-settings-toolbar">
+            <button
+              class="ghost opt-refresh-btn"
+              @click="loadAvailableLlmModels(optimizeConfig.llm_provider)"
+              :disabled="llmModelsLoading"
+              title="Refresh available models for current API key"
+            >
+              {{ llmModelsLoading ? "Loading..." : "Refresh Models" }}
+            </button>
+          </div>
+          <div class="create-grid">
+            <div class="field">
+              <label>LLM Provider</label>
+              <select class="select-pretty" v-model="optimizeConfig.llm_provider" @change="updateProviderBaseUrl(optimizeConfig.llm_provider); loadAvailableLlmModels(optimizeConfig.llm_provider, false)">
+                <option v-for="provider in llmProviderOptions" :key="provider" :value="provider">{{ getProviderLabel(provider) }}</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>LLM Model</label>
+              <select class="select-pretty" v-model="optimizeConfig.llm_model" :disabled="llmModelsLoading">
+                <option v-for="m in availableLlmModels" :key="m" :value="m">{{ m }}</option>
+              </select>
+            </div>
+          </div>
+          <div class="create-grid">
+            <div class="field">
+              <label>Base URL</label>
+              <input v-model="optimizeConfig.llm_base_url" @change="loadAvailableLlmModels(optimizeConfig.llm_provider)" placeholder="http://127.0.0.1:11434" />
+            </div>
+            <div class="field" v-if="modelRequiresToken()" style="max-width:220px">
+              <label>API Token</label>
+              <input type="password" v-model="optimizeConfig.llm_api_token" :placeholder="optimizeConfig.effective_has_llm_api_token ? 'Token already set' : 'Enter your API token'" />
+              <p v-if="optimizeConfig.effective_has_llm_api_token" style="margin:4px 0 0;color:var(--muted);font-size:0.82rem">✓ Token is configured</p>
+            </div>
+            <div class="field" v-else style="max-width:220px">
+              <label>LLM Timeout (seconds)</label>
+              <input type="number" min="5" v-model.number="optimizeConfig.llm_timeout_seconds" />
+            </div>
+          </div>
+          <div class="create-grid" v-if="modelRequiresToken()">
+            <div class="field" style="max-width:220px">
+              <label>LLM Timeout (seconds)</label>
+              <input type="number" min="5" v-model.number="optimizeConfig.llm_timeout_seconds" />
+            </div>
+          </div>
+          <p v-if="llmModelsLoading" style="margin:4px 0 0;color:var(--muted);font-size:0.84rem">Loading available models...</p>
+          <p v-if="llmModelsLoadError" style="margin:4px 0 0;color:var(--muted);font-size:0.84rem">{{ llmModelsLoadError }}</p>
+        </div>
+
+        <div class="opt-settings-group opt-settings-group-gp">
+          <h5>GreaterPrompt Settings</h5>
+          <div class="create-grid">
+            <div class="field">
+              <label>GreaterPrompt Profile</label>
+              <select class="select-pretty" v-model="optimizeConfig.gp_profile">
+                <option v-for="p in gpProfileOptions" :key="p" :value="p">{{ p }}</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>GreaterPrompt Model (optional)</label>
+              <select class="select-pretty" v-model="optimizeConfig.model_id">
+                <option value="">No model selected (lightweight mode)</option>
+                <optgroup v-for="group in gpRecommendedModelGroups" :key="group" :label="group">
+                  <option
+                    v-for="model in gpModelsByGroup[group]"
+                    :key="model.value"
+                    :value="model.value"
+                  >
+                    {{ model.label }}{{ model.recommended ? ' - recommended' : '' }}
+                  </option>
+                </optgroup>
+              </select>
+              <p class="gp-model-hint" v-if="selectedGpModelMeta">
+                {{ selectedGpModelMeta.label }}: {{ selectedGpModelMeta.bestUse }} | VRAM {{ selectedGpModelMeta.vram }}
+              </p>
+              <p class="gp-model-hint" v-else>
+                Empty value keeps GreaterPrompt in lightweight mode without loading a local gradient model.
+              </p>
+            </div>
+          </div>
+          <div class="field" style="max-width:180px">
+            <label>Gradient Rounds</label>
+            <input type="number" min="1" v-model.number="optimizeConfig.rounds" />
+          </div>
+          <div class="gp-model-table-wrap">
+            <div class="gp-model-table-title">Recommended Models</div>
+            <div class="gp-model-cards gp-model-cards-empty">
+              <button
+                type="button"
+                class="gp-model-card gp-model-card-empty"
+                :class="{ active: !optimizeConfig.model_id }"
+                @click="optimizeConfig.model_id = ''"
+              >
+                <div class="gp-model-card-top">
+                  <div class="gp-model-card-title">No model</div>
+                  <span class="gp-model-support gp-model-support-light">Lightweight</span>
+                </div>
+                <div class="gp-model-card-meta">Runs without loading a gradient model</div>
+                <div class="gp-model-card-grid">
+                  <div><span>Quality</span><strong>Lightweight</strong></div>
+                  <div><span>Speed</span><strong>Fastest</strong></div>
+                  <div><span>VRAM</span><strong>Minimal</strong></div>
+                  <div><span>Use</span><strong>Heuristic mode</strong></div>
+                </div>
+              </button>
+            </div>
+
+            <div
+              class="gp-model-group"
+              v-for="group in gpRecommendedModelGroups"
+              :key="group"
+            >
+              <div class="gp-model-group-title">{{ group }}</div>
+              <div class="gp-model-cards">
+                <button
+                  type="button"
+                  class="gp-model-card"
+                  :class="{
+                    active: optimizeConfig.model_id === model.value,
+                    'gp-model-card-supported': model.supported === '✔',
+                    'gp-model-card-compatible': model.supported !== '✔'
+                  }"
+                  v-for="model in gpModelsByGroup[group]"
+                  :key="model.value"
+                  @click="optimizeConfig.model_id = model.value"
+                >
+                  <div class="gp-model-card-top">
+                    <div>
+                      <div class="gp-model-card-title">{{ model.label }}</div>
+                      <div class="gp-model-card-group">{{ model.group }}</div>
+                    </div>
+                    <div class="gp-model-card-badges">
+                      <span class="gp-model-support" :class="model.supported === '✔' ? 'gp-model-support-official' : 'gp-model-support-compatible'">
+                        {{ model.supported === '✔' ? 'Official' : 'Compatible' }}
+                      </span>
+                      <span class="gp-model-badge" v-if="model.recommended">Recommended</span>
+                    </div>
+                  </div>
+                  <div class="gp-model-card-meta">{{ model.supported === '✔' ? 'Official GreaterPrompt support' : 'Works as a compatible alternative' }}</div>
+                  <div class="gp-model-card-grid">
+                    <div><span>Quality</span><strong>{{ model.quality }}</strong></div>
+                    <div><span>Speed</span><strong>{{ model.speed }}</strong></div>
+                    <div><span>VRAM</span><strong>{{ model.vram }}</strong></div>
+                    <div><span>Best use</span><strong>{{ model.bestUse }}</strong></div>
+                  </div>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="btn-row" style="margin-top:12px">
+          <button class="secondary" @click="saveOptimizeConfig">Save Config</button>
+        </div>
+        <p v-if="optimizeConfigStatus" :class="optimizeConfigStatus.includes('Failed') ? 'status-err' : 'status-ok'">{{ optimizeConfigStatus }}</p>
+        <p style="margin:6px 0 0;color:var(--muted);font-size:0.84rem">
+          Active GP profile: {{ optimizeConfig.effective_gp_profile }} | Active LLM model: {{ optimizeConfig.effective_llm_model }} | Active provider: {{ optimizeConfig.effective_llm_provider }} | Timeout: {{ optimizeConfig.effective_llm_timeout_seconds }}s
+        </p>
+      </div>
+
+      <div v-if="isAdmin" class="admin-panel">
+        <div class="admin-panel-header">
+          <div>
+            <h3>Admin tools moved</h3>
+            <p>Project and user management are now available in the dedicated Admin tab.</p>
+          </div>
+          <button class="secondary" @click="activeTab='admin'">Open Admin</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" v-if="activeTab==='admin' && isAdmin">
+      <div class="admin-panel" style="margin-top:0;border-top:none;padding-top:0">
+        <div class="admin-panel-header">
+          <div>
+            <h3>Administration</h3>
+            <p>Manage projects, users, and project access rights.</p>
+          </div>
+          <button class="ghost" @click="Promise.all([loadRoles(), loadProjects(), loadUsers()])" :disabled="usersLoading || projectsLoading">{{ (usersLoading || projectsLoading) ? 'Loading...' : 'Refresh Admin Data' }}</button>
+        </div>
+
+        <div class="admin-grid">
+          <div class="admin-card">
+            <h4>Projects</h4>
+            <div class="field">
+              <label>New Project Name</label>
+              <input v-model="newProjectForm.name" placeholder="payments" />
+            </div>
+            <div class="btn-row">
+              <button class="secondary" @click="createProjectRecord">Create Project</button>
+            </div>
+            <p v-if="projectsStatus" :class="projectsStatus.includes('Failed') ? 'status-err' : 'status-ok'">{{ projectsStatus }}</p>
+            <p v-if="!projects.length && !projectsLoading" style="color:var(--muted)">No projects yet.</p>
+            <div class="project-list">
+              <div class="project-row" v-for="project in projects" :key="project.id">
+                <div v-if="editingProjectId===project.id" class="project-edit-row">
+                  <input v-model="editProjectForm.name" />
+                  <div class="btn-row">
+                    <button class="secondary" @click="saveProjectEdit(project.id)">Save</button>
+                    <button class="ghost" @click="cancelProjectEdit">Cancel</button>
+                  </div>
+                </div>
+                <div v-else class="project-row-static">
+                  <div class="project-name">{{ project.name }}</div>
+                  <div class="btn-row">
+                    <button class="ghost" @click="beginEditProject(project)">Rename</button>
+                    <button class="danger" @click="deleteProjectRecord(project)">Delete</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="admin-card">
+            <h4>Create User</h4>
+            <div class="field">
+              <label>Username</label>
+              <input v-model="newUserForm.username" placeholder="developer-1" />
+            </div>
+            <div class="field">
+              <label>Password</label>
+              <input type="password" v-model="newUserForm.password" placeholder="Temporary password" />
+            </div>
+            <div class="create-grid">
+              <div class="field">
+                <label>Role</label>
+                <select class="select-pretty" v-model="newUserForm.role">
+                  <option v-for="roleName in roleOptions" :key="roleName" :value="roleName">{{ roleName }}</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Status</label>
+                <select class="select-pretty" v-model="newUserForm.is_active">
+                  <option :value="true">active</option>
+                  <option :value="false">inactive</option>
+                </select>
+              </div>
+            </div>
+            <div class="field">
+              <label>Projects</label>
+              <div class="project-selector" v-if="availableProjectNames.length">
+                <button
+                  type="button"
+                  class="project-pill"
+                  :class="{ active: isProjectSelected(newUserForm, projectName) }"
+                  v-for="projectName in availableProjectNames"
+                  :key="projectName"
+                  @click="toggleProjectSelection(newUserForm, projectName)"
+                >
+                  {{ projectName }}
+                </button>
+              </div>
+              <p v-else class="project-selector-empty">Create at least one project before assigning rights.</p>
+            </div>
+            <div class="btn-row">
+              <button class="secondary" @click="createUserAccount">Create User</button>
+            </div>
+          </div>
+
+          <div class="admin-card admin-card-wide admin-card-full">
+            <h4>Existing Users</h4>
+            <p v-if="usersStatus" :class="usersStatus.includes('Failed') ? 'status-err' : 'status-ok'">{{ usersStatus }}</p>
+            <p v-if="!users.length && !usersLoading" style="color:var(--muted)">No users found.</p>
+            <div class="user-list">
+              <div class="user-card" v-for="user in users" :key="user.id">
+                <div class="user-card-header">
+                  <div>
+                    <div class="user-card-title">{{ user.username }}</div>
+                    <div class="user-card-meta">Role: {{ user.role }} | {{ user.is_active ? 'active' : 'inactive' }}</div>
+                  </div>
+                  <div class="chips">
+                    <span class="chip" v-for="project in user.projects" :key="project">{{ project }}</span>
+                    <span class="chip" v-if="!user.projects.length">all / none assigned</span>
+                  </div>
+                </div>
+
+                <div v-if="editingUserId===user.id" class="user-editor">
+                  <div class="field">
+                    <label>Username</label>
+                    <input v-model="editUserForm.username" />
+                  </div>
+                  <div class="create-grid">
+                    <div class="field">
+                      <label>Role</label>
+                      <select class="select-pretty" v-model="editUserForm.role">
+                        <option v-for="roleName in roleOptions" :key="roleName" :value="roleName">{{ roleName }}</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label>Status</label>
+                      <select class="select-pretty" v-model="editUserForm.is_active">
+                        <option :value="true">active</option>
+                        <option :value="false">inactive</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <label>New Password (optional)</label>
+                    <input type="password" v-model="editUserForm.password" placeholder="Leave empty to keep current password" />
+                  </div>
+                  <div class="field">
+                    <label>Projects</label>
+                    <div class="project-selector" v-if="availableProjectNames.length">
+                      <button
+                        type="button"
+                        class="project-pill"
+                        :class="{ active: isProjectSelected(editUserForm, projectName) }"
+                        v-for="projectName in availableProjectNames"
+                        :key="projectName"
+                        @click="toggleProjectSelection(editUserForm, projectName)"
+                      >
+                        {{ projectName }}
+                      </button>
+                    </div>
+                    <p v-else class="project-selector-empty">Create at least one project before assigning rights.</p>
+                  </div>
+                  <div class="btn-row">
+                    <button class="secondary" @click="saveUserEdit(user.id)">Save</button>
+                    <button class="ghost" @click="cancelUserEdit">Cancel</button>
+                  </div>
+                </div>
+
+                <div v-else class="btn-row">
+                  <button class="ghost" @click="beginEditUser(user)">Edit</button>
+                  <button class="danger" :disabled="currentUser.id===user.id" @click="deleteUserAccount(user)">Delete</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="modal-backdrop" v-if="optimizerModalOpen" @click.self="optimizerModalOpen=false">
       <div class="modal-card">
         <div class="modal-header">
@@ -824,97 +1813,42 @@ createApp({
         </div>
 
         <p class="status-err" v-if="optimizerError">{{ optimizerError }}</p>
-        <p v-else-if="optimizerLoading" style="color:var(--muted)">Optimizing prompt...</p>
+        <p v-if="optimizerStatus" style="margin:0 0 8px;color:var(--muted)">
+          Status: {{ optimizerStatus }}
+        </p>
+        <p v-if="optimizerLoading" style="margin:0 0 10px;color:var(--muted)">Optimization is running on backend ...</p>
 
-        <div v-else>
-          <p style="margin:0 0 8px;color:var(--muted)">Engine: {{ optimizerEngine }}</p>
-
-          <div class="opt-config-box">
-            <h4 style="margin:0 0 8px">Optimization Config</h4>
-            <div class="opt-settings-group">
-              <h5>LLM Settings</h5>
-              <div class="create-grid">
-                <div class="field">
-                  <label>LLM Provider</label>
-                  <select class="select-pretty" v-model="optimizeConfig.llm_provider" @change="updateProviderBaseUrl(optimizeConfig.llm_provider); loadAvailableLlmModels(optimizeConfig.llm_provider)">
-                    <option v-for="provider in llmProviderOptions" :key="provider" :value="provider">{{ getProviderLabel(provider) }}</option>
-                  </select>
-                </div>
-                <div class="field">
-                  <div style="display: flex; align-items: center; gap: 8px;">
-                    <label style="flex: 1;">LLM Model</label>
-                    <button @click="loadAvailableLlmModels(optimizeConfig.llm_provider)" :disabled="llmModelsLoading" style="padding: 4px 8px; cursor: pointer; font-size: 0.9rem; white-space: nowrap;" title="Refresh available models for current API key">
-                      {{ llmModelsLoading ? "Loading..." : "Refresh" }}
-                    </button>
-                  </div>
-                  <select class="select-pretty" v-model="optimizeConfig.llm_model" :disabled="llmModelsLoading">
-                    <option v-for="m in availableLlmModels" :key="m" :value="m">{{ m }}</option>
-                  </select>
-                </div>
-              </div>
-              <div class="create-grid">
-                <div class="field">
-                  <label>Base URL</label>
-                  <input v-model="optimizeConfig.llm_base_url" @change="loadAvailableLlmModels(optimizeConfig.llm_provider)" placeholder="http://127.0.0.1:11434" />
-                </div>
-                <div class="field" v-if="modelRequiresToken()" style="max-width:220px">
-                  <label>API Token</label>
-                  <input type="password" v-model="optimizeConfig.llm_api_token" :placeholder="optimizeConfig.effective_has_llm_api_token ? 'Token already set' : 'Enter your API token'" />
-                  <p v-if="optimizeConfig.effective_has_llm_api_token" style="margin:4px 0 0;color:var(--muted);font-size:0.82rem">✓ Token is configured</p>
-                </div>
-                <div class="field" v-else style="max-width:220px">
-                  <label>LLM Timeout (seconds)</label>
-                  <input type="number" min="5" v-model.number="optimizeConfig.llm_timeout_seconds" />
-                </div>
-              </div>
-              <div class="create-grid" v-if="modelRequiresToken()">
-                <div class="field" style="max-width:220px">
-                  <label>LLM Timeout (seconds)</label>
-                  <input type="number" min="5" v-model.number="optimizeConfig.llm_timeout_seconds" />
-                </div>
-              </div>
-              <p v-if="llmModelsLoading" style="margin:4px 0 0;color:var(--muted);font-size:0.84rem">Loading available models...</p>
-              <p v-if="llmModelsLoadError" style="margin:4px 0 0;color:var(--muted);font-size:0.84rem">{{ llmModelsLoadError }}</p>
-            </div>
-
-            <div class="opt-settings-group opt-settings-group-gp">
-              <h5>GreaterPrompt Settings</h5>
-              <div class="create-grid">
-                <div class="field">
-                  <label>GreaterPrompt Profile</label>
-                  <select class="select-pretty" v-model="optimizeConfig.gp_profile">
-                    <option v-for="p in gpProfileOptions" :key="p" :value="p">{{ p }}</option>
-                  </select>
-                </div>
-                <div class="field">
-                  <label>GreaterPrompt Model ID (optional)</label>
-                  <input v-model="optimizeConfig.model_id" placeholder="meta-llama/..." />
-                </div>
-              </div>
-              <div class="field" style="max-width:180px">
-                <label>Gradient Rounds</label>
-                <input type="number" min="1" v-model.number="optimizeConfig.rounds" />
-              </div>
-            </div>
-            <div class="btn-row" style="margin-top:6px">
-              <button class="secondary" @click="saveOptimizeConfig">Save Config</button>
-              <button class="secondary" :disabled="optimizerLoading" @click="reoptimizePrompt">Reoptimize</button>
-            </div>
-            <p v-if="optimizeConfigStatus" :class="optimizeConfigStatus.includes('Failed') ? 'status-err' : 'status-ok'">{{ optimizeConfigStatus }}</p>
-            <p style="margin:6px 0 0;color:var(--muted);font-size:0.84rem">
-              Active GP profile: {{ optimizeConfig.effective_gp_profile }} | Active LLM model: {{ optimizeConfig.effective_llm_model }} | Active provider: {{ optimizeConfig.effective_llm_provider }} | Timeout: {{ optimizeConfig.effective_llm_timeout_seconds }}s
-            </p>
+        <div class="optimizer-log-box">
+          <div class="optimizer-log-title">Execution log</div>
+          <div class="optimizer-log-empty" v-if="!optimizerLogs.length">No log entries yet.</div>
+          <div
+            class="optimizer-log-line"
+            v-for="(entry, idx) in optimizerLogs"
+            :key="idx"
+            :class="'log-' + entry.level"
+          >
+            [{{ entry.ts }}] {{ entry.message }}
           </div>
+        </div>
+
+        <div v-if="!optimizerLoading">
+          <p style="margin:0 0 8px;color:var(--muted)">Mode: {{ optimizerMode === 'llm' ? 'LLM' : 'GreaterPrompt' }}</p>
+          <p style="margin:0 0 8px;color:var(--muted)">Engine: {{ optimizerEngine }}</p>
+          <p style="margin:0 0 10px;color:var(--muted);font-size:0.9rem">
+            Active GP profile: {{ optimizeConfig.effective_gp_profile }} | Active LLM model: {{ optimizeConfig.effective_llm_model }} | Active provider: {{ optimizeConfig.effective_llm_provider }} | Timeout: {{ optimizeConfig.effective_llm_timeout_seconds }}s
+          </p>
 
           <div class="chips" v-if="optimizerNotes.length">
             <span class="chip" v-for="(note, idx) in optimizerNotes" :key="idx">{{ note }}</span>
           </div>
           <div class="md-content" style="margin-top:10px" v-html="md(optimizedMarkdown || buildPromptMarkdown(optimizedDraft))"></div>
           <div class="btn-row" style="margin-top:12px">
+            <button class="secondary" :disabled="optimizerLoading" @click="reoptimizePrompt">Reoptimize</button>
             <button @click="applyOptimizedPrompt">Update Prompt</button>
           </div>
         </div>
       </div>
     </div>
+    </template>
   `,
 }).mount("#app");
